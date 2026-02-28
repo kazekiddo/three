@@ -1,0 +1,47 @@
+GitHub Actions 部署说明
+
+1. 在 GitHub 仓库设置 Secrets（Settings -> Secrets and variables -> Actions）：
+   - SERVER_HOST: 服务器IP地址
+   - SERVER_USER: SSH用户名
+   - SERVER_SSH_KEY: SSH私钥内容
+   - SERVER_PORT: SSH端口（默认22）
+
+2. 修改 .github/workflows/deploy.yml 中的路径：
+   - 将 /path/to/your/project 改为实际项目路径
+
+3. 服务器准备：
+   - 确保服务器已安装 Python 3.7+
+   - 创建虚拟环境：python -m venv venv
+   - 确保 .env 文件已配置好（不要提交到 git）
+   - 确保数据库已创建并执行了 create_tables.sql
+
+4. 推送代码到 main 分支即可自动部署
+
+5. 手动触发：在 GitHub Actions 页面点击 "Run workflow"
+
+6. 查看日志：ssh 到服务器后执行 tail -f bot.log
+
+---
+
+Systemd 服务配置说明
+
+1. 修改 tg-bot.service 文件：
+   - 将 your_username 改为实际用户名
+   - 将 /path/to/your/project 改为实际项目路径（3处）
+
+2. 安装服务：
+   sudo cp tg-bot.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+
+3. 启动服务：
+   sudo systemctl start tg-bot
+
+4. 设置开机自启：
+   sudo systemctl enable tg-bot
+
+5. 常用命令：
+   sudo systemctl status tg-bot    # 查看状态
+   sudo systemctl stop tg-bot      # 停止服务
+   sudo systemctl restart tg-bot   # 重启服务
+   sudo journalctl -u tg-bot -f    # 查看日志
+
