@@ -106,6 +106,8 @@ async def select_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户消息"""
+    import asyncio
+    
     user_id = update.effective_user.id
     user_message = update.message.text
     
@@ -119,12 +121,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_ai = user_chats[user_id]
         response = chat_ai.send_message(user_message)
         
-        # 按 \n\n 拆分消息
-        messages = response.split('\n\n')
+        # 按换行符拆分消息
+        messages = response.split('\n')
         
-        # 分别发送每条消息
+        # 每分钟80个汉字，即每个字0.75秒
+        char_delay = 60.0 / 80.0
+        
+        # 分别发送每条消息，模拟输入延迟
         for msg in messages:
-            if msg.strip():  # 跳过空消息
+            if msg.strip():
+                # 计算这条消息的延迟时间
+                delay = len(msg.strip()) * char_delay
+                await asyncio.sleep(delay)
                 await update.message.reply_text(msg.strip())
     except Exception as e:
         logger.error(f"处理消息出错: {e}")
