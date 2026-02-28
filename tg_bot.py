@@ -56,6 +56,28 @@ class ChatAI:
 
 # 全局变量存储每个用户的聊天实例
 user_chats = {}
+ALLOWED_USER_ID = 569020802
+
+async def check_permission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """检查用户权限"""
+    user_id = update.effective_user.id
+    
+    if user_id != ALLOWED_USER_ID:
+        user_name = update.effective_user.full_name or update.effective_user.username or "Unknown"
+        message_text = update.message.text if update.message else "Unknown"
+        
+        try:
+            await context.bot.send_message(
+                chat_id=ALLOWED_USER_ID,
+                text=f"未授权用户尝试访问：\n用户名: {user_name}\nID: {user_id}\n消息: {message_text}"
+            )
+        except:
+            pass
+        
+        await update.message.reply_text("I don't know.")
+        return False
+    
+    return True
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /start 命令"""
@@ -110,23 +132,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.effective_user.id
     user_message = update.message.text
-    user_name = update.effective_user.full_name or update.effective_user.username or "Unknown"
-    
-    # 白名单检查
-    ALLOWED_USER_ID = 569020802
-    if user_id != ALLOWED_USER_ID:
-        # 通知管理员
-        try:
-            await context.bot.send_message(
-                chat_id=ALLOWED_USER_ID,
-                text=f"未授权用户尝试访问：\n用户名: {user_name}\nID: {user_id}\n消息: {user_message}"
-            )
-        except:
-            pass
-        
-        # 回复未授权用户
-        await update.message.reply_text("I don't know.")
-        return
     
     # 检查用户是否已选择角色
     if user_id not in user_chats:
@@ -199,6 +204,9 @@ def main():
         .pool_timeout(30.0)
         .build()
     )
+    
+    # 添加全局权限检查过滤器（最先执行）
+    application.add_handler(MessageHandler(filters.ALL, check_permission), group=-1)
     
     # 添加处理器
     application.add_handler(CommandHandler("start", start))
