@@ -4,7 +4,7 @@ After=network.target postgresql.service
 
 [Service]
 Type=simple
-User=your_username
+User=root
 WorkingDirectory=/data/three
 ExecStart=/usr/bin/python3 /data/three/tg_bot.py
 Restart=always

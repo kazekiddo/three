@@ -6,10 +6,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from google import genai
 from database import Database
 
-# 启用日志
+# 只记录错误日志
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.ERROR
 )
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,6 @@ user_chats = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /start 命令"""
-    logger.info(f"收到 /start 命令，用户ID: {update.effective_user.id}")
     user_id = update.effective_user.id
     
     db = Database()
@@ -107,7 +106,6 @@ async def select_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户消息"""
-    logger.info(f"收到消息，用户ID: {update.effective_user.id}, 内容: {update.message.text}")
     user_id = update.effective_user.id
     user_message = update.message.text
     
@@ -121,7 +119,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_ai = user_chats[user_id]
         response = chat_ai.send_message(user_message)
         
-        await update.message.reply_text(response)
+        # 按 \n\n 拆分消息
+        messages = response.split('\n\n')
+        
+        # 分别发送每条消息
+        for msg in messages:
+            if msg.strip():  # 跳过空消息
+                await update.message.reply_text(msg.strip())
     except Exception as e:
         logger.error(f"处理消息出错: {e}")
         await update.message.reply_text(f"错误：{str(e)}")
@@ -160,8 +164,6 @@ def main():
         print("错误：请设置 TELEGRAM_BOT_TOKEN 环境变量")
         return
     
-    logger.info(f"Bot Token: {token[:10]}...")
-    
     # 创建应用，增加超时时间
     application = (
         Application.builder()
@@ -180,7 +182,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # 启动机器人
-    logger.info("Telegram Bot 已启动，等待消息...")
+    print("Telegram Bot 已启动")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
