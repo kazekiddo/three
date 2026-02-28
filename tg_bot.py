@@ -110,6 +110,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.effective_user.id
     user_message = update.message.text
+    user_name = update.effective_user.full_name or update.effective_user.username or "Unknown"
+    
+    # 白名单检查
+    ALLOWED_USER_ID = 569020802
+    if user_id != ALLOWED_USER_ID:
+        # 通知管理员
+        try:
+            await context.bot.send_message(
+                chat_id=ALLOWED_USER_ID,
+                text=f"未授权用户尝试访问：\n用户名: {user_name}\nID: {user_id}\n消息: {user_message}"
+            )
+        except:
+            pass
+        
+        # 回复未授权用户
+        await update.message.reply_text("I don't know.")
+        return
     
     # 检查用户是否已选择角色
     if user_id not in user_chats:
