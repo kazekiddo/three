@@ -34,10 +34,6 @@ jobs:
           port: ${{ secrets.SERVER_PORT }}
           script: |
             cd /data/three
-            if [ ! -d "venv" ]; then
-              python3 -m venv venv
-            fi
-            source venv/bin/activate
-            pip install -r requirements.txt
+            pip3 install -r requirements.txt
             sudo systemctl restart three-tg-bot
             echo "Bot deployed and restarted successfully"
