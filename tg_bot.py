@@ -149,8 +149,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 按换行符拆分消息
         messages = response.split('\n')
         
-        # 每分钟80个汉字，即每个字0.75秒
-        char_delay = 60.0 / 80.0
+        # 每分钟120个汉字
+        char_delay = 60.0 / 120.0
         
         # 分别发送每条消息，模拟输入延迟
         for msg in messages:
