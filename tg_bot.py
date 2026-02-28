@@ -133,6 +133,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户消息"""
     import asyncio
     
+    async def keep_typing(chat_id, duration):
+        """持续发送 typing 状态"""
+        end_time = asyncio.get_event_loop().time() + duration
+        while asyncio.get_event_loop().time() < end_time:
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+                await asyncio.sleep(4)  # 每4秒刷新一次
+            except asyncio.CancelledError:
+                break
+    
     user_id = update.effective_user.id
     user_message = update.message.text
     
@@ -157,7 +167,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if msg.strip():
                 # 计算这条消息的延迟时间
                 delay = len(msg.strip()) * char_delay
+                
+                # 在延迟期间持续显示正在输入
+                typing_task = asyncio.create_task(keep_typing(update.effective_chat.id, delay))
                 await asyncio.sleep(delay)
+                typing_task.cancel()
+                
                 await update.message.reply_text(msg.strip())
     except Exception as e:
         logger.error(f"处理消息出错: {e}")
