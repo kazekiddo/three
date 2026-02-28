@@ -75,7 +75,10 @@ async def check_permission(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             pass
         
         await update.message.reply_text("I don't know.")
-        return False
+        
+        # 停止后续处理器执行
+        from telegram.ext import ApplicationHandlerStop
+        raise ApplicationHandlerStop
     
     return True
 
