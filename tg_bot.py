@@ -29,12 +29,13 @@ class ChatAI:
         self.client = genai.Client(api_key=api_key)
         self.model = model
         self.character_id = character_id
+        self.system_instruction = system_instruction
         self.db = Database()
         
-        # 从数据库加载历史记录
+        # 从数据库加载过去 24 小时的历史记录作为当天的缓冲区
         history = []
         if character_id:
-            db_messages = self.db.get_chat_history(character_id, limit=50)
+            db_messages = self.db.get_recent_chat_history(character_id, hours=24)
             for msg in db_messages:
                 history.append({
                     'role': msg['role'],
@@ -60,6 +61,17 @@ class ChatAI:
             )
         else:
             self.chat = self.client.chats.create(model=model)
+            
+    def clear_history(self):
+        """每天凌晨清空一次内存中的长对话列表"""
+        logger.info(f"正在清空角色 {self.character_id} 的短期对话感知缓冲...")
+        if self.system_instruction:
+            self.chat = self.client.chats.create(
+                model=self.model,
+                config={'system_instruction': self.system_instruction}
+            )
+        else:
+            self.chat = self.client.chats.create(model=self.model)
     
     def send_message(self, message):
         """发送消息并获取回复"""
@@ -296,12 +308,22 @@ def main():
 
     job_queue = application.job_queue
 
+    # 每天凌晨三点清空所有内存列表的上下文，截断上下文依赖
+    async def clear_chat_history_job(context: ContextTypes.DEFAULT_TYPE):
+        try:
+            for uid, chat_ai in user_chats.items():
+                chat_ai.clear_history()
+            logger.info("已清空所有日更活跃用户聊天列表")
+        except Exception as e:
+            logger.error(f"清空聊天列表失败: {e}")
+
     # 系统启动后 10 秒执行一次提纯，清理历史遗留并且无需等待到半夜
     job_queue.run_once(memory_filter_job, when=10)
 
     # 每天凌晨三点（北京时间 UTC+8）执行一次提纯。UTC 19:00 是北京时间 03:00
     filter_time = datetime.time(hour=19, minute=0, second=0, tzinfo=datetime.timezone.utc)
     job_queue.run_daily(memory_filter_job, time=filter_time)
+    job_queue.run_daily(clear_chat_history_job, time=filter_time)
 
     # 每天凌晨四点（北京时间 UTC+8）执行一次巩固。UTC 20:00 是北京时间 04:00
     consolidate_time = datetime.time(hour=20, minute=0, second=0, tzinfo=datetime.timezone.utc)
