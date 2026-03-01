@@ -46,10 +46,10 @@ class ChatAI:
         
         # 获取AI回复
         response = self.chat.send_message(message)
-        response_text = response.text
+        response_text = response.text if response.text else ""
         
-        # 保存AI回复
-        if self.character_id:
+        # 保存AI回复（只有非空时才保存）
+        if self.character_id and response_text.strip():
             self.db.save_message(self.character_id, 'assistant', response_text, self.model)
         
         return response_text
