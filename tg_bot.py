@@ -41,14 +41,25 @@ class ChatAI:
                     'parts': [{'text': msg['message']}]
                 })
         
-        # 创建配置
-        config = {'model': model}
-        if system_instruction:
-            config['system_instruction'] = system_instruction
-        if history:
-            config['history'] = history
-        
-        self.chat = self.client.chats.create(**config)
+        # 创建聊天
+        if system_instruction and history:
+            self.chat = self.client.chats.create(
+                model=model,
+                config={'system_instruction': system_instruction},
+                history=history
+            )
+        elif system_instruction:
+            self.chat = self.client.chats.create(
+                model=model,
+                config={'system_instruction': system_instruction}
+            )
+        elif history:
+            self.chat = self.client.chats.create(
+                model=model,
+                history=history
+            )
+        else:
+            self.chat = self.client.chats.create(model=model)
     
     def send_message(self, message):
         """发送消息并获取回复"""
@@ -133,12 +144,16 @@ async def select_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # 创建新的聊天实例
-    user_chats[user_id] = ChatAI(
-        system_instruction=character['system_instruction'],
-        character_id=character_id
-    )
+    try:
+        user_chats[user_id] = ChatAI(
+            system_instruction=character['system_instruction'],
+            character_id=character_id
+        )
+        await update.message.reply_text(f"已选择角色：{character['name']}\n现在可以开始聊天了！")
+    except Exception as e:
+        logger.error(f"创建聊天实例失败: {e}")
+        await update.message.reply_text(f"创建聊天失败：{str(e)}")
     
-    await update.message.reply_text(f"已选择角色：{character['name']}\n现在可以开始聊天了！")
     db.close()
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
