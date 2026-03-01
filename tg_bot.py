@@ -73,7 +73,7 @@ class ChatAI:
             try:
                 # 获取消息的 embedding 用于检索
                 embed_response = self.client.models.embed_content(
-                    model='text-embedding-004',
+                    model='gemini-embedding-001',
                     contents=message
                 )
                 embedding = embed_response.embeddings[0].values

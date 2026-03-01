@@ -5,6 +5,8 @@ from datetime import datetime
 import numpy as np
 import logging
 from pgvector.psycopg2 import register_vector
+
+class Database:
     def __init__(self, database_url=None):
         """初始化数据库连接"""
         if database_url is None:
