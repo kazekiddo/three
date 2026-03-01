@@ -29,14 +29,26 @@ class ChatAI:
         self.character_id = character_id
         self.db = Database()
         
+        # 从数据库加载历史记录
+        history = []
+        if character_id:
+            db_messages = self.db.get_chat_history(character_id, limit=50)
+            for msg in db_messages:
+                # 角色映射：assistant -> model
+                role = "model" if msg['role'] == 'assistant' else msg['role']
+                history.append({
+                    'role': role,
+                    'parts': [{'text': msg['message']}]
+                })
+        
         # 创建配置
+        config = {'model': model}
         if system_instruction:
-            self.chat = self.client.chats.create(
-                model=model,
-                config={'system_instruction': system_instruction}
-            )
-        else:
-            self.chat = self.client.chats.create(model=model)
+            config['system_instruction'] = system_instruction
+        if history:
+            config['history'] = history
+        
+        self.chat = self.client.chats.create(**config)
     
     def send_message(self, message):
         """发送消息并获取回复"""
