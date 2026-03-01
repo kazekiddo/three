@@ -34,11 +34,9 @@ class ChatAI:
         if character_id:
             db_messages = self.db.get_chat_history(character_id, limit=50)
             for msg in db_messages:
-                # 角色映射：assistant -> model
-                role = "model" if msg['role'] == 'assistant' else msg['role']
                 history.append({
-                    'role': role,
-                    'parts': [{'text': msg['message']}]
+                    'role': msg['role'],
+                    'parts': [{'text': msg['content']}]
                 })
         
         # 创建聊天
@@ -73,7 +71,7 @@ class ChatAI:
         
         # 保存AI回复（只有非空时才保存）
         if self.character_id and response_text.strip():
-            self.db.save_message(self.character_id, 'assistant', response_text, self.model)
+            self.db.save_message(self.character_id, 'model', response_text, self.model)
         
         return response_text
 
@@ -227,7 +225,7 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     history_text = "最近10条对话记录：\n\n"
     for msg in messages:
-        history_text += f"{msg['role']}: {msg['message'][:50]}...\n"
+        history_text += f"{msg['role']}: {msg['content'][:50]}...\n"
     
     await update.message.reply_text(history_text)
 

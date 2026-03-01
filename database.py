@@ -55,14 +55,14 @@ class Database:
             conn.commit()
             return character_id
     
-    def save_message(self, character_id, role, message, model=None):
+    def save_message(self, character_id, role, content, model=None):
         """保存聊天消息"""
         conn = self.connect()
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO chat_messages (character_id, role, message, model, timestamp) 
+                """INSERT INTO chat_messages (character_id, role, content, model, timestamp) 
                    VALUES (%s, %s, %s, %s, %s)""",
-                (character_id, role, message, model, datetime.now())
+                (character_id, role, content, model, datetime.now())
             )
             conn.commit()
     
@@ -71,7 +71,7 @@ class Database:
         conn = self.connect()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """SELECT role, message, model, timestamp 
+                """SELECT role, content, model, timestamp 
                    FROM chat_messages 
                    WHERE character_id = %s 
                    ORDER BY timestamp DESC 
