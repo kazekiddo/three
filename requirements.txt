@@ -2,3 +2,5 @@ google-genai
 python-dotenv
 psycopg2-binary
 python-telegram-bot
+numpy
+pgvector

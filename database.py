@@ -2,8 +2,9 @@ import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
-
-class Database:
+import numpy as np
+import logging
+from pgvector.psycopg2 import register_vector
     def __init__(self, database_url=None):
         """初始化数据库连接"""
         if database_url is None:
@@ -19,6 +20,12 @@ class Database:
         """连接数据库"""
         if self.conn is None or self.conn.closed:
             self.conn = psycopg2.connect(self.database_url)
+            # 注册 pgvector 支持
+            try:
+                register_vector(self.conn)
+            except psycopg2.errors.UndefinedObject:
+                # 如果没有开启矢量扩展，可以忽略或打印警告
+                logging.warning("pgvector 扩展可能未启用")
         return self.conn
     
     def close(self):
@@ -80,3 +87,109 @@ class Database:
             )
             messages = cur.fetchall()
             return list(reversed(messages))
+
+    # --- 记忆漏斗方法开始 ---
+
+    def get_unextracted_messages(self, character_id, limit=5000):
+        """获取指定角色未处理的原始对话"""
+        conn = self.connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT id, character_id, role, content, timestamp 
+                   FROM chat_messages 
+                   WHERE character_id = %s AND is_extracted = false 
+                   ORDER BY timestamp ASC 
+                   LIMIT %s""",
+                (character_id, limit)
+            )
+            return cur.fetchall()
+
+    def mark_messages_extracted(self, message_ids):
+        """将原始对话标记为已提取"""
+        if not message_ids:
+            return
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE chat_messages SET is_extracted = true WHERE id = ANY(%s)",
+                (list(message_ids),)
+            )
+            conn.commit()
+
+    def save_episodic_memory(self, character_id, content, emotion_intensity, promotion_candidate=True):
+        """保存提纯后的情景记忆"""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO episodic_memories (character_id, content, emotion_intensity, promotion_candidate)
+                   VALUES (%s, %s, %s, %s)""",
+                (character_id, content, emotion_intensity, promotion_candidate)
+            )
+            conn.commit()
+
+    def get_all_characters_with_episodic(self):
+         """获取所有有情景记忆的角色 ID"""
+         conn = self.connect()
+         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+             cur.execute("SELECT DISTINCT character_id FROM episodic_memories")
+             return [row['character_id'] for row in cur.fetchall()]
+
+    def get_recent_episodic_memories(self, character_id, days=1):
+        """获取最近的情景记忆（供每日晋升扫描）"""
+        conn = self.connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT id, content, emotion_intensity 
+                   FROM episodic_memories 
+                   WHERE character_id = %s AND promotion_candidate = true AND created_at >= CURRENT_DATE - INTERVAL '%s days'""",
+                (character_id, days)
+            )
+            return cur.fetchall()
+
+    def save_core_fact_memory(self, character_id, fact_text, embedding, category, stability_score, evidence_span):
+        """保存核心人格特征"""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            # pgvector 支持 numpy arrays 或者 lists 作为输入
+            cur.execute(
+                """INSERT INTO core_fact_memories 
+                   (character_id, fact_text, embedding, category, stability_score, evidence_span)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (character_id, fact_text, np.array(embedding), category, stability_score, evidence_span)
+            )
+            conn.commit()
+
+    def search_core_fact_memories(self, character_id, query_embedding, limit=3):
+        """向量检索最相关的性格核心特征（未归档且相关度高）"""
+        conn = self.connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 用余弦距离，<-> 是 Euclidean, <=> 是余弦距离, <#> 是内积
+            # 搜索相似度高的事实，并要求未归档且 validation_score > 0.3
+            cur.execute(
+                """SELECT id, fact_text, validation_score, 1 - (embedding <=> %s::vector) AS similarity 
+                   FROM core_fact_memories 
+                   WHERE character_id = %s 
+                     AND is_archived = false
+                     AND validation_score > 0.3
+                   ORDER BY embedding <=> %s::vector 
+                   LIMIT %s""",
+                (np.array(query_embedding), character_id, np.array(query_embedding), limit)
+            )
+            return cur.fetchall()
+
+    def update_validation_score(self, fact_id, delta):
+        """更新验证分，如果低于0.3则归档"""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE core_fact_memories 
+                   SET validation_score = validation_score + %s 
+                   WHERE id = %s 
+                   RETURNING validation_score""",
+                (delta, fact_id)
+            )
+            score = cur.fetchone()[0]
+            if score < 0.3:
+                cur.execute("UPDATE core_fact_memories SET is_archived = true WHERE id = %s", (fact_id,))
+            conn.commit()
+    # --- 记忆漏斗方法结束 ---

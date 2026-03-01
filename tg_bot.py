@@ -5,6 +5,8 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google import genai
 from database import Database
+import datetime
+
 
 # 只记录错误日志
 logging.basicConfig(
@@ -65,8 +67,32 @@ class ChatAI:
         if self.character_id:
             self.db.save_message(self.character_id, 'user', message, self.model)
         
+        # 向量检索核心记忆
+        core_facts_text = ""
+        if self.character_id:
+            try:
+                # 获取消息的 embedding 用于检索
+                embed_response = self.client.models.embed_content(
+                    model='text-embedding-004',
+                    contents=message
+                )
+                embedding = embed_response.embeddings[0].values
+                
+                # 调取最相关的3条人格特质
+                core_facts = self.db.search_core_fact_memories(self.character_id, embedding, limit=3)
+                if core_facts:
+                    core_facts_text = "\\n\\n[系统附加背景记忆：根据长期互动，关于该用户的核心特质（供参考）]\\n"
+                    for i, fact in enumerate(core_facts):
+                        core_facts_text += f"{i+1}. {fact['fact_text']}\\n"
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"检索核心记忆失败: {e}")
+
+        # 拼接带背景上下文的消息
+        augmented_message = message + core_facts_text if core_facts_text else message
+
         # 获取AI回复
-        response = self.chat.send_message(message)
+        response = self.chat.send_message(augmented_message)
         response_text = response.text if response.text else ""
         
         # 保存AI回复（只有非空时才保存）
@@ -257,8 +283,32 @@ def main():
     application.add_handler(CommandHandler("history", history))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
+    # 启动后台记忆任务
+    async def memory_filter_job(context: ContextTypes.DEFAULT_TYPE):
+        from memory_worker import MemoryWorker
+        worker = MemoryWorker()
+        await worker.filter_task()
+
+    async def memory_consolidate_job(context: ContextTypes.DEFAULT_TYPE):
+        from memory_worker import MemoryWorker
+        worker = MemoryWorker()
+        await worker.consolidate_task()
+
+    job_queue = application.job_queue
+
+    # 系统启动后 10 秒执行一次提纯，清理历史遗留并且无需等待到半夜
+    job_queue.run_once(memory_filter_job, when=10)
+
+    # 每天凌晨三点（北京时间 UTC+8）执行一次提纯。UTC 19:00 是北京时间 03:00
+    filter_time = datetime.time(hour=19, minute=0, second=0, tzinfo=datetime.timezone.utc)
+    job_queue.run_daily(memory_filter_job, time=filter_time)
+
+    # 每天凌晨四点（北京时间 UTC+8）执行一次巩固。UTC 20:00 是北京时间 04:00
+    consolidate_time = datetime.time(hour=20, minute=0, second=0, tzinfo=datetime.timezone.utc)
+    job_queue.run_daily(memory_consolidate_job, time=consolidate_time)
+
     # 启动机器人
-    print("Telegram Bot 已启动")
+    print("Telegram Bot 已启动，记忆漏斗任务已注册")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
