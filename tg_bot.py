@@ -101,10 +101,10 @@ class ChatAI:
             """
             try:
                 # 调用 gemini-3.1-flash-image-preview 生成图片
-                response = self.client.models.generate_image(
+                response = self.client.models.generate_images(
                     model='gemini-3.1-flash-image-preview',
                     prompt=prompt,
-                    config=types.GenerateImageConfig(output_mime_type='image/jpeg')
+                    config=types.GenerateImagesConfig(output_mime_type='image/jpeg')
                 )
                 image_bytes = response.generated_images[0].image_bytes
                 
