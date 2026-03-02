@@ -163,15 +163,42 @@ class Database:
              cur.execute("SELECT DISTINCT character_id FROM episodic_memories")
              return [row['character_id'] for row in cur.fetchall()]
 
-    def get_recent_episodic_memories(self, character_id, days=1):
-        """获取最近的情景记忆（供每日晋升扫描）"""
+    def get_unconsolidated_episodic_memories(self, character_id, limit=100):
+        """获取尚未合并巩固到核心人格的情景记忆"""
         conn = self.connect()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """SELECT id, content, emotion_intensity 
                    FROM episodic_memories 
-                   WHERE character_id = %s AND promotion_candidate = true AND created_at >= CURRENT_DATE - INTERVAL '%s days'""",
-                (character_id, days)
+                   WHERE character_id = %s 
+                     AND promotion_candidate = true 
+                     AND is_consolidated = false
+                   ORDER BY created_at ASC
+                   LIMIT %s""",
+                (character_id, limit)
+            )
+            return cur.fetchall()
+
+    def mark_episodic_consolidated(self, episodic_ids):
+        """标记情景记忆为已合并巩固"""
+        if not episodic_ids: return
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE episodic_memories SET is_consolidated = true WHERE id = ANY(%s)",
+                (episodic_ids,)
+            )
+            conn.commit()
+
+    def get_active_core_facts(self, character_id):
+        """获取角色所有活跃（未归档）的核心特质"""
+        conn = self.connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT id, fact_text, category, stability_score, evidence_span 
+                   FROM core_fact_memories 
+                   WHERE character_id = %s AND is_archived = false""",
+                (character_id,)
             )
             return cur.fetchall()
 
@@ -195,7 +222,7 @@ class Database:
             # 用余弦距离，<-> 是 Euclidean, <=> 是余弦距离, <#> 是内积
             # 搜索相似度高的事实，并要求未归档且 validation_score > 0.3
             cur.execute(
-                """SELECT id, fact_text, evidence_span, validation_score, 1 - (embedding <=> %s::vector) AS similarity 
+                """SELECT id, fact_text, evidence_span, validation_score, stability_score, 1 - (embedding <=> %s::vector) AS similarity 
                    FROM core_fact_memories 
                    WHERE character_id = %s 
                      AND is_archived = false

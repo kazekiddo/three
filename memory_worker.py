@@ -92,73 +92,88 @@ class MemoryWorker:
             logger.error(f"执行过滤任务失败: {e}")
 
     async def consolidate_task(self):
-        """每日执行：将情景记忆巩固为核心长期记忆"""
-        logger.info("开始执行巩固任务（提炼核心人格）")
+        """每日执行：将新产生的碎片情景记忆，增量式地演进为核心长期人格"""
+        logger.info("开始执行增量巩固任务...")
         try:
-            char_ids = self.db.get_all_characters_with_episodic()
-            for cid in char_ids:
-                memories = self.db.get_recent_episodic_memories(cid, days=3) # 根据过去3天评估
-                if len(memories) < 3:
-                    continue # 事件太少，先不晋升
+            characters = self.db.list_characters()
+            for char in characters:
+                cid = char['id']
+                # 1. 捞出昨天甚至更早还没被处理的新事件
+                new_memories = self.db.get_unconsolidated_episodic_memories(cid, limit=100)
+                if not new_memories:
+                    continue
 
-                events_text = "\n".join([f"- {m['content']} (情绪值: {m['emotion_intensity']})" for m in memories])
+                # 2. 捞出目前已有的核心人格画像作为“基准”
+                existing_facts = self.db.get_active_core_facts(cid)
+                
+                # 组装 Prompt
+                existing_text = "\n".join([f"ID:{f['id']} | {f['fact_text']} (稳定性: {f['stability_score']})" for f in existing_facts]) or "暂无已知特征"
+                new_events_text = "\n".join([f"- {m['content']} (情绪值: {m['emotion_intensity']})" for m in new_memories])
                 
                 prompt = (
-                    "阅读以下最近发生的用户情境记忆事件。\n"
-                    "寻找在这些事件中反复出现的主题、情绪模式或稳定性特质（如发生了3次以上类似的事情）。\n"
-                    f"事件记录：\n{events_text}\n\n"
-                    "如果有可以抽象为核心人格特质的发现，请以JSON格式返回（数组），每个对象包含：\n"
-                    "- fact_text: 高度抽象的结论，例如'用户存在持续的外貌焦虑'\n"
-                    "- category: 类别（如'性格', '偏好', '痛点'）\n"
-                    "- stability_score: 初始稳定分（根据此事发生频率给出，0.0-1.0）\n"
-                    "- evidence_span: 简要记录是根据哪些具体事件得出的\n"
+                    "你是一位高级心理学家，负责分析用户的最新动态并演进其核心人格画像。\n\n"
+                    "【已知的核心人格特征】\n"
+                    f"{existing_text}\n\n"
+                    "【新产生的事件碎片】\n"
+                    f"{new_events_text}\n\n"
+                    "任务：分析新事件对已知特征的影响。请输出一个 JSON 列表，每个对象包含：\n"
+                    "1. action: \n"
+                    "   - 'update': 强化了已知特征 (需提供 existing_id)。\n"
+                    "   - 'new': 发现了全新的、值得长期记住的特征。\n"
+                    "   - 'contradict': 新事件反驳了已知特征 (需提供 existing_id)。\n"
+                    "2. existing_id: (仅针对 update/contradict)\n"
+                    "3. fact_text: (仅针对 new) 简练的特征描述。\n"
+                    "4. category: (仅针对 new) '性格'/'偏好'/'习惯'/'痛点'等。\n"
+                    "5. stability_score: (0.0-1.0) 该事件反映的特质强度。\n"
+                    "6. evidence_span: 对该判断的简短依据。\n"
                 )
 
                 try:
                     response = self.client.models.generate_content(
                         model='gemini-2.5-flash',
                         contents=prompt,
-                        config={
-                            'response_mime_type': 'application/json'
-                        }
+                        config={'response_mime_type': 'application/json'}
                     )
                     
                     if response.text:
                         results = json.loads(response.text)
                         for res in results:
-                            # 计算向量并存入数据库
-                            fact_text = res.get('fact_text')
-                            if not fact_text:
-                                continue
-                                
-                            embed_response = self.client.models.embed_content(
-                                model='gemini-embedding-001',
-                                contents=fact_text
-                            )
-                            embedding = embed_response.embeddings[0].values
+                            action = res.get('action')
                             
-                            # 检查是否已存在类似的性格特征
-                            existing_fact = self.db.get_similar_core_fact(cid, embedding, threshold=0.85)
-                            
-                            if existing_fact:
-                                # 若存在，更新稳定性并追加证据
+                            if action == 'update' and res.get('existing_id'):
+                                # 强化已有特征
                                 self.db.update_core_fact_memory(
-                                    fact_id=existing_fact['id'],
+                                    fact_id=res['existing_id'],
                                     stability_score=float(res.get('stability_score', 0.5)),
-                                    evidence_span=res.get('evidence_span', '')
+                                    evidence_span=res.get('evidence_span', '日常重复确认')
                                 )
-                            else:
-                                # 若没有，正常保存
-                                self.db.save_core_fact_memory(
-                                    character_id=cid,
-                                    fact_text=fact_text,
-                                    embedding=embedding,
-                                    category=res.get('category', '一般'),
-                                    stability_score=float(res.get('stability_score', 0.5)),
-                                    evidence_span=res.get('evidence_span', '')
-                                )
+                            elif action == 'contradict' and res.get('existing_id'):
+                                # 反驳已有特征，扣分
+                                self.db.update_validation_score(res['existing_id'], -0.2)
+                            elif action == 'new':
+                                # 插入新特征
+                                fact_text = res.get('fact_text')
+                                if fact_text:
+                                    embed_res = self.client.models.embed_content(
+                                        model='gemini-embedding-001',
+                                        contents=fact_text
+                                    )
+                                    embedding = embed_res.embeddings[0].values
+                                    self.db.save_core_fact_memory(
+                                        character_id=cid,
+                                        fact_text=fact_text,
+                                        embedding=embedding,
+                                        category=res.get('category', '一般'),
+                                        stability_score=float(res.get('stability_score', 0.5)),
+                                        evidence_span=res.get('evidence_span', '')
+                                    )
+                    
+                    # 3. 标记这些情景记忆为已处理
+                    processed_ids = [m['id'] for m in new_memories]
+                    self.db.mark_episodic_consolidated(processed_ids)
+                    
                 except Exception as e:
-                    logger.error(f"巩固核心记忆失败 对于角色 {cid}: {e}")
+                    logger.error(f"合并任务子逻辑失败 {cid}: {e}")
                     
         except Exception as e:
-            logger.error(f"执行巩固任务失败: {e}")
+            logger.error(f"执行增量巩固任务失败: {e}")
