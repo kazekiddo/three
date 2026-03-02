@@ -41,8 +41,10 @@ class ChatAI:
         self.last_message_timestamp = None
         self.last_prefix_timestamp = None
         
-        # 预加载角色设定图 (用于视觉一致性)
+        # 预加载角色设定图和用户（思远）设定图 (用于视觉一致性)
         self.character_photo_path = "/data/three/media/photos/photo_nanase.jpg"
+        self.user_photo_path = "/data/three/media/photos/photo_siyuan.jpg"
+        
         character_photo_part = None
         if os.path.exists(self.character_photo_path):
             try:
@@ -101,19 +103,28 @@ class ChatAI:
                 prompt: 详细的图片描述词，使用英文描述效果更佳。
             """
             try:
-                # 按照用户提供的“图片编辑/视觉参考”逻辑：采用 [Prompt, Image] 列表形式
+                # 按照用户提供的“图片编辑/视觉参考”逻辑：采用 [Prompt, Image1, Image2...] 列表形式
                 generation_contents = []
                 
-                # 读取 prompt
-                generation_contents.append(prompt)
+                # 读取 prompt，并在 prompt 中补充提示，让模型知道参考图的归属
+                full_prompt = f"{prompt} (Reference image 1 is the character Nanase, Reference image 2 is the user Siyuan)"
+                generation_contents.append(full_prompt)
                 
-                # 如果有设定图，作为第二个 part (即 Image) 传入，用于引导生成
+                # 1. 加载角色设定图 (Nanase)
                 if os.path.exists(self.character_photo_path):
                     try:
-                        ref_image = Image.open(self.character_photo_path)
-                        generation_contents.append(ref_image)
+                        ref_char_image = Image.open(self.character_photo_path)
+                        generation_contents.append(ref_char_image)
                     except Exception as e:
-                        logger.error(f"加载设定图为 PIL 对象失败: {e}")
+                        logger.error(f"加载角色设定图失败: {e}")
+                
+                # 2. 加载用户设定图 (Siyuan)
+                if os.path.exists(self.user_photo_path):
+                    try:
+                        ref_user_image = Image.open(self.user_photo_path)
+                        generation_contents.append(ref_user_image)
+                    except Exception as e:
+                        logger.error(f"加载用户设定图失败: {e}")
 
                 # 调用 gemini-3.1-flash-image-preview 生成图片，暂不设置不支持的 image_size
                 response = self.client.models.generate_content(
