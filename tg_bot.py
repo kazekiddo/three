@@ -31,15 +31,21 @@ class ChatAI:
         self.character_id = character_id
         self.system_instruction = system_instruction
         self.db = Database()
+        self.last_message_timestamp = None
         
         # 从数据库加载过去 24 小时的历史记录作为当天的缓冲区
         history = []
         if character_id:
+            self.last_message_timestamp = self.db.get_last_message_timestamp(character_id)
             db_messages = self.db.get_recent_chat_history(character_id, hours=24)
             for msg in db_messages:
+                # 若数据库中有单独的时间锚点缓存，提取并包裹
+                prefix = f"{msg['context_prefix']} " if msg.get('context_prefix') else ""
+                text_content = f"{prefix}{msg['content']}"
+
                 history.append({
                     'role': msg['role'],
-                    'parts': [{'text': msg['content']}]
+                    'parts': [{'text': text_content}]
                 })
         
         # 创建聊天
@@ -75,9 +81,26 @@ class ChatAI:
     
     def send_message(self, message):
         """发送消息并获取回复"""
-        # 保存用户消息
+        context_prefix = None
+        
+        # 处理时间连续性感知架构 (判断与上一条用户消息的时间差)
         if self.character_id:
-            self.db.save_message(self.character_id, 'user', message, self.model)
+            last_timestamp = self.last_message_timestamp
+            now_dt = datetime.datetime.now()
+            
+            # 如果是第一次聊天，或者距离上次发言超过了 30 分钟，增加强制前导系统时间锚点
+            if not last_timestamp or (now_dt - last_timestamp).total_seconds() > 1800:
+                weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+                weekday_str = weekdays[now_dt.weekday()]
+                current_time_str = now_dt.strftime(f"%Y年%m月%d日 {weekday_str} %H:%M:%S")
+                context_prefix = f"[系统时间感知：当前时间 {current_time_str}]"
+            
+            # 更新上次说话时间为本次
+            self.last_message_timestamp = now_dt
+        
+        # 保存用户消息，同步落库纯净和前置标签（如果有）
+        if self.character_id:
+            self.db.save_message(self.character_id, 'user', message, self.model, context_prefix)
         
         # 向量检索核心记忆
         core_facts_text = ""
@@ -100,8 +123,16 @@ class ChatAI:
                 import logging
                 logging.getLogger(__name__).error(f"检索核心记忆失败: {e}")
 
-        # 拼接带背景上下文的消息
-        augmented_message = message + core_facts_text if core_facts_text else message
+        # 拼接最终提交给 LLM 的增强上下文：
+        # 1. 临时系统时间锚点 (决定了流逝感)
+        # 2. 原始消息
+        # 3. 跨期长记忆碎片 (决定了记忆留存)
+        augmented_message = ""
+        if context_prefix:
+            augmented_message += f"{context_prefix}\\n"
+        augmented_message += message
+        if core_facts_text:
+            augmented_message += core_facts_text
 
         # 获取AI回复
         response = self.chat.send_message(augmented_message)

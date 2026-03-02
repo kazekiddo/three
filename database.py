@@ -64,14 +64,14 @@ class Database:
             conn.commit()
             return character_id
     
-    def save_message(self, character_id, role, content, model=None):
+    def save_message(self, character_id, role, content, model=None, context_prefix=None):
         """保存聊天消息"""
         conn = self.connect()
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO chat_messages (character_id, role, content, model, timestamp) 
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (character_id, role, content, model, datetime.now())
+                """INSERT INTO chat_messages (character_id, role, content, context_prefix, model, timestamp) 
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (character_id, role, content, context_prefix, model, datetime.now())
             )
             conn.commit()
     
@@ -80,7 +80,7 @@ class Database:
         conn = self.connect()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """SELECT role, content, model, timestamp 
+                """SELECT role, content, context_prefix, model, timestamp 
                    FROM chat_messages 
                    WHERE character_id = %s 
                    ORDER BY timestamp DESC 
@@ -95,7 +95,7 @@ class Database:
         conn = self.connect()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """SELECT role, content, model, timestamp 
+                """SELECT role, content, context_prefix, model, timestamp 
                    FROM chat_messages 
                    WHERE character_id = %s 
                      AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '%s hours'
@@ -111,7 +111,7 @@ class Database:
         conn = self.connect()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """SELECT id, character_id, role, content, timestamp 
+                """SELECT id, character_id, role, content, context_prefix, timestamp 
                    FROM chat_messages 
                    WHERE character_id = %s AND is_extracted = false 
                    ORDER BY timestamp ASC 
@@ -131,6 +131,19 @@ class Database:
                 (list(message_ids),)
             )
             conn.commit()
+
+    def get_last_message_timestamp(self, character_id):
+         """获取该角色最后一次发言（不论user还是model）的时间"""
+         conn = self.connect()
+         with conn.cursor() as cur:
+             cur.execute(
+                 """SELECT timestamp FROM chat_messages 
+                    WHERE character_id = %s 
+                    ORDER BY timestamp DESC LIMIT 1""",
+                 (character_id,)
+             )
+             res = cur.fetchone()
+             return res[0] if res else None
 
     def save_episodic_memory(self, character_id, content, emotion_intensity, promotion_candidate=True):
         """保存提纯后的情景记忆"""

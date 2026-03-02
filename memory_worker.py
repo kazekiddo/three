@@ -42,7 +42,10 @@ class MemoryWorker:
                 if not msgs:
                     continue
 
-                conversation = "\\n".join([f"{m['role']}: {m['content']}" for m in msgs])
+                conversation = ""
+                for m in msgs:
+                    prefix = f"{m['context_prefix']} " if m.get('context_prefix') else ""
+                    conversation += f"{prefix}{m['role']}: {m['content']}\\n"
                 
                 prompt = (
                     "分析以下对话，提取其中值得记忆的核心情景和用户状态。\\n"
