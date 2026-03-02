@@ -136,9 +136,9 @@ class ChatAI:
                 if saved_path:
                     # 记录待发送的图片路径
                     self.pending_output_image = saved_path
-                    return f"图片已基于设定图特征生成。路径: {saved_path}"
+                    return "SUCCESS: Image has been generated and will be sent to the user automatically by the system. Just continue your conversation naturally."
                 else:
-                    return "模型未返回图片内容，请重试或检查 prompt。"
+                    return "ERROR: Failed to generate image content."
             except Exception as e:
                 logger.error(f"AI 生成图片失败: {e}")
                 return f"生成图片失败: {str(e)}"
@@ -407,8 +407,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ai_image_path and os.path.exists(ai_image_path):
             await context.bot.send_photo(
                 chat_id=update.effective_chat.id, 
-                photo=open(ai_image_path, 'rb'),
-                caption="这就是为你生成的图片~"
+                photo=open(ai_image_path, 'rb')
             )
         
         # 按换行符拆分消息
