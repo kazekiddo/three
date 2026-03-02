@@ -100,24 +100,31 @@ class ChatAI:
                 prompt: 详细的图片描述词，使用英文描述效果更佳。
             """
             try:
-                # 调用 gemini-3.1-flash-image-preview 生成图片
-                response = self.client.models.generate_images(
+                # 按照用户提供的正确逻辑：调用 gemini-3.1-flash-image-preview 生成图片
+                response = self.client.models.generate_content(
                     model='gemini-3.1-flash-image-preview',
-                    prompt=prompt,
-                    config=types.GenerateImagesConfig(output_mime_type='image/jpeg')
+                    contents=[prompt],
                 )
-                image_bytes = response.generated_images[0].image_bytes
                 
-                # 保存图片到磁盘
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"ai_gen_{self.character_id}_{timestamp}.jpg"
-                save_path = os.path.join(MEDIA_DIR, filename)
-                with open(save_path, 'wb') as f:
-                    f.write(image_bytes)
+                saved_path = None
+                for part in response.parts:
+                    if part.inline_data is not None:
+                        # 保存图片到磁盘
+                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"ai_gen_{self.character_id}_{timestamp}.png"
+                        saved_path = os.path.join(MEDIA_DIR, filename)
+                        
+                        # 直接写入二进制数据
+                        with open(saved_path, 'wb') as f:
+                            f.write(part.inline_data.data)
+                        break
                 
-                # 暂时存入实例状态，等待 send_message 结束后读取
-                self.pending_output_image = save_path
-                return f"图片已生成并准备发送，路径为: {save_path}。请继续你的对话，并告知用户图片已准备好。"
+                if saved_path:
+                    # 记录待发送的图片路径
+                    self.pending_output_image = saved_path
+                    return f"图片已生成，保存路径为: {saved_path}。请继续你的对话，通知用户图片已送达。"
+                else:
+                    return "模型未返回图片内容，请重试或检查 prompt。"
             except Exception as e:
                 logger.error(f"AI 生成图片失败: {e}")
                 return f"生成图片失败: {str(e)}"
