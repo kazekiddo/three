@@ -54,10 +54,19 @@ class ChatAI:
             except Exception as e:
                 logger.error(f"加载设定图出错: {e}")
 
+        user_photo_part = None
+        if os.path.exists(self.user_photo_path):
+            try:
+                with open(self.user_photo_path, 'rb') as f:
+                    u_photo_data = f.read()
+                user_photo_part = types.Part.from_bytes(data=u_photo_data, mime_type='image/jpeg')
+            except Exception as e:
+                logger.error(f"加载用户设定图出错: {e}")
+
         # 从数据库加载过去 24 小时的历史记录作为当天的缓冲区
         history = []
         
-        # 如果有设定图，注入到历史记录的最开始，作为 AI 的“自我认知”
+        # 1. 注入角色设定图
         if character_photo_part:
             history.append({
                 'role': 'user',
@@ -69,6 +78,20 @@ class ChatAI:
             history.append({
                 'role': 'model',
                 'parts': [{'text': "我已经看到了我的设定图。我会记住我的面部特征和整体形象，并在需要生成我的照片时保持一致性。"}]
+            })
+
+        # 2. 注入用户（思远）设定图
+        if user_photo_part:
+            history.append({
+                'role': 'user',
+                'parts': [
+                    {'text': "系统通知：以下是当前对话用户（名：思远）的肖像参考图。请通过此图建立对用户的视觉认知。当你生成关于用户的照片时，请以此为基准。"},
+                    user_photo_part
+                ]
+            })
+            history.append({
+                'role': 'model',
+                'parts': [{'text': "收到了，我已经看到了思远的肖像图。我会记住他的样子。"}]
             })
 
         if character_id:
