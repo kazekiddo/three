@@ -32,6 +32,7 @@ class ChatAI:
         self.system_instruction = system_instruction
         self.db = Database()
         self.last_message_timestamp = None
+        self.last_prefix_timestamp = None
         
         # 从数据库加载过去 24 小时的历史记录作为当天的缓冲区
         history = []
@@ -88,12 +89,19 @@ class ChatAI:
             last_timestamp = self.last_message_timestamp
             now_dt = datetime.datetime.now()
             
-            # 如果是第一次聊天，或者距离上次发言超过了 30 分钟，增加强制前导系统时间锚点
-            if not last_timestamp or (now_dt - last_timestamp).total_seconds() > 1800:
+            # 如果是第一次聊天，或者距离上次发言超过 30 分钟，或者距离上次打标超过 30 分钟（针对连续聊天），强制增加系统时间锚点
+            if (not last_timestamp or 
+                (now_dt - last_timestamp).total_seconds() > 1800 or 
+                not self.last_prefix_timestamp or 
+                (now_dt - self.last_prefix_timestamp).total_seconds() > 1800):
+                
                 weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
                 weekday_str = weekdays[now_dt.weekday()]
                 current_time_str = now_dt.strftime(f"%Y年%m月%d日 {weekday_str} %H:%M:%S")
                 context_prefix = f"[系统时间感知：当前时间 {current_time_str}]"
+                
+                # 更新上一次插入时间后缀的锚点
+                self.last_prefix_timestamp = now_dt
             
             # 更新上次说话时间为本次
             self.last_message_timestamp = now_dt
@@ -116,9 +124,10 @@ class ChatAI:
                 # 调取最相关的3条人格特质
                 core_facts = self.db.search_core_fact_memories(self.character_id, embedding, limit=3)
                 if core_facts:
-                    core_facts_text = "\\n\\n[系统附加背景记忆：根据长期互动，关于该用户的核心特质（供参考）]\\n"
+                    core_facts_text = "\n\n[系统附加背景记忆：根据长期互动，关于该用户的核心特质（供参考）]\n"
                     for i, fact in enumerate(core_facts):
-                        core_facts_text += f"{i+1}. {fact['fact_text']}\\n"
+                        evidence = f" (依据: {fact['evidence_span']})" if fact.get('evidence_span') else ""
+                        core_facts_text += f"{i+1}. {fact['fact_text']}{evidence}\n"
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).error(f"检索核心记忆失败: {e}")
@@ -129,7 +138,7 @@ class ChatAI:
         # 3. 跨期长记忆碎片 (决定了记忆留存)
         augmented_message = ""
         if context_prefix:
-            augmented_message += f"{context_prefix}\\n"
+            augmented_message += f"{context_prefix}\n"
         augmented_message += message
         if core_facts_text:
             augmented_message += core_facts_text
@@ -141,6 +150,8 @@ class ChatAI:
         # 保存AI回复（只有非空时才保存）
         if self.character_id and response_text.strip():
             self.db.save_message(self.character_id, 'model', response_text, self.model)
+            # 同样更新内存中的最后互动时间，确保 30 分钟判断更精准
+            self.last_message_timestamp = datetime.datetime.now()
         
         return response_text
 

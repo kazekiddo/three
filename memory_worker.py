@@ -45,16 +45,16 @@ class MemoryWorker:
                 conversation = ""
                 for m in msgs:
                     prefix = f"{m['context_prefix']} " if m.get('context_prefix') else ""
-                    conversation += f"{prefix}{m['role']}: {m['content']}\\n"
+                    conversation += f"{prefix}{m['role']}: {m['content']}\n"
                 
                 prompt = (
-                    "分析以下对话，提取其中值得记忆的核心情景和用户状态。\\n"
-                    "如果是纯日常寒暄或废话，忽略即可。\\n"
-                    f"对话记录：\\n{conversation}\\n\\n"
-                    "请以JSON格式返回（数组），每个对象包含：\\n"
-                    "- content: 提纯后的事实，例如'用户因为工作压力大而失眠'\\n"
-                    "- emotion_intensity: 1-10的情绪评分\\n"
-                    "- promotion_candidate: 是否可能反映长期人格（涉及童年、偏好、习惯等为true，纯废话为false）\\n"
+                    "分析以下对话，提取其中值得记忆的核心情景和用户状态。\n"
+                    "如果是纯日常寒暄或废话，忽略即可。\n"
+                    f"对话记录：\n{conversation}\n\n"
+                    "请以JSON格式返回（数组），每个对象包含：\n"
+                    "- content: 提纯后的事实，例如'用户因为工作压力大而失眠'\n"
+                    "- emotion_intensity: 1-10的情绪评分\n"
+                    "- promotion_candidate: 是否可能反映长期人格（涉及童年、偏好、习惯等为true，纯废话为false）\n"
                 )
 
                 try:
@@ -101,17 +101,17 @@ class MemoryWorker:
                 if len(memories) < 3:
                     continue # 事件太少，先不晋升
 
-                events_text = "\\n".join([f"- {m['content']} (情绪值: {m['emotion_intensity']})" for m in memories])
+                events_text = "\n".join([f"- {m['content']} (情绪值: {m['emotion_intensity']})" for m in memories])
                 
                 prompt = (
-                    "阅读以下最近发生的用户情境记忆事件。\\n"
-                    "寻找在这些事件中反复出现的主题、情绪模式或稳定性特质（如发生了3次以上类似的事情）。\\n"
-                    f"事件记录：\\n{events_text}\\n\\n"
-                    "如果有可以抽象为核心人格特质的发现，请以JSON格式返回（数组），每个对象包含：\\n"
-                    "- fact_text: 高度抽象的结论，例如'用户存在持续的外貌焦虑'\\n"
-                    "- category: 类别（如'性格', '偏好', '痛点'）\\n"
-                    "- stability_score: 初始稳定分（根据此事发生频率给出，0.0-1.0）\\n"
-                    "- evidence_span: 简要记录是根据哪些具体事件得出的\\n"
+                    "阅读以下最近发生的用户情境记忆事件。\n"
+                    "寻找在这些事件中反复出现的主题、情绪模式或稳定性特质（如发生了3次以上类似的事情）。\n"
+                    f"事件记录：\n{events_text}\n\n"
+                    "如果有可以抽象为核心人格特质的发现，请以JSON格式返回（数组），每个对象包含：\n"
+                    "- fact_text: 高度抽象的结论，例如'用户存在持续的外貌焦虑'\n"
+                    "- category: 类别（如'性格', '偏好', '痛点'）\n"
+                    "- stability_score: 初始稳定分（根据此事发生频率给出，0.0-1.0）\n"
+                    "- evidence_span: 简要记录是根据哪些具体事件得出的\n"
                 )
 
                 try:
@@ -137,14 +137,26 @@ class MemoryWorker:
                             )
                             embedding = embed_response.embeddings[0].values
                             
-                            self.db.save_core_fact_memory(
-                                character_id=cid,
-                                fact_text=fact_text,
-                                embedding=embedding,
-                                category=res.get('category', '一般'),
-                                stability_score=float(res.get('stability_score', 0.5)),
-                                evidence_span=res.get('evidence_span', '')
-                            )
+                            # 检查是否已存在类似的性格特征
+                            existing_fact = self.db.get_similar_core_fact(cid, embedding, threshold=0.85)
+                            
+                            if existing_fact:
+                                # 若存在，更新稳定性并追加证据
+                                self.db.update_core_fact_memory(
+                                    fact_id=existing_fact['id'],
+                                    stability_score=float(res.get('stability_score', 0.5)),
+                                    evidence_span=res.get('evidence_span', '')
+                                )
+                            else:
+                                # 若没有，正常保存
+                                self.db.save_core_fact_memory(
+                                    character_id=cid,
+                                    fact_text=fact_text,
+                                    embedding=embedding,
+                                    category=res.get('category', '一般'),
+                                    stability_score=float(res.get('stability_score', 0.5)),
+                                    evidence_span=res.get('evidence_span', '')
+                                )
                 except Exception as e:
                     logger.error(f"巩固核心记忆失败 对于角色 {cid}: {e}")
                     

@@ -195,7 +195,7 @@ class Database:
             # 用余弦距离，<-> 是 Euclidean, <=> 是余弦距离, <#> 是内积
             # 搜索相似度高的事实，并要求未归档且 validation_score > 0.3
             cur.execute(
-                """SELECT id, fact_text, validation_score, 1 - (embedding <=> %s::vector) AS similarity 
+                """SELECT id, fact_text, evidence_span, validation_score, 1 - (embedding <=> %s::vector) AS similarity 
                    FROM core_fact_memories 
                    WHERE character_id = %s 
                      AND is_archived = false
@@ -205,6 +205,35 @@ class Database:
                 (np.array(query_embedding), character_id, np.array(query_embedding), limit)
             )
             return cur.fetchall()
+
+    def get_similar_core_fact(self, character_id, embedding, threshold=0.85):
+        """查找是否有非常相似的已有核心特征，返回 id"""
+        conn = self.connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT id, stability_score 
+                   FROM core_fact_memories 
+                   WHERE character_id = %s 
+                     AND is_archived = false
+                     AND (1 - (embedding <=> %s::vector)) > %s
+                   LIMIT 1""",
+                (character_id, np.array(embedding), threshold)
+            )
+            return cur.fetchone()
+
+    def update_core_fact_memory(self, fact_id, stability_score, evidence_span):
+        """更新已有的核心人格特征（演进分数和证据）"""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE core_fact_memories 
+                   SET stability_score = (stability_score + %s) / 2.0,
+                       evidence_span = CONCAT(evidence_span, ' | ', %s),
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = %s""",
+                (stability_score, evidence_span, fact_id)
+            )
+            conn.commit()
 
     def update_validation_score(self, fact_id, delta):
         """更新验证分，如果低于0.3则归档"""
