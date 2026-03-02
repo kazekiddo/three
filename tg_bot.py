@@ -115,14 +115,13 @@ class ChatAI:
                     except Exception as e:
                         logger.error(f"加载设定图为 PIL 对象失败: {e}")
 
-                # 调用 gemini-3.1-flash-image-preview 生成图片，并设置分辨率为 1K 以减小体积
+                # 调用 gemini-3.1-flash-image-preview 生成图片，暂不设置不支持的 image_size
                 response = self.client.models.generate_content(
                     model='gemini-3.1-flash-image-preview',
                     contents=generation_contents,
                     config=types.GenerateContentConfig(
                         image_config=types.ImageConfig(
-                            aspect_ratio="3:4",
-                            image_size="1K"
+                            aspect_ratio="3:4"
                         )
                     )
                 )
@@ -130,13 +129,24 @@ class ChatAI:
                 saved_path = None
                 for part in response.parts:
                     if part.inline_data is not None:
-                        # 使用用户示范的 as_image() 方法保存图片
+                        # 确定保存路径，使用 .jpg 格式
                         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                        filename = f"ai_gen_{self.character_id}_{timestamp}.png"
+                        filename = f"ai_gen_{self.character_id}_{timestamp}.jpg"
                         saved_path = os.path.join(MEDIA_DIR, filename)
                         
+                        # 使用 PIL 进行压缩处理
                         image_out = part.as_image()
-                        image_out.save(saved_path)
+                        
+                        # 如果图片过大（比如超过 1536 像素长边），按比例缩放以减小体积
+                        max_size = 1280
+                        if max(image_out.size) > max_size:
+                            image_out.thumbnail((max_size, max_size), Image.LANCZOS)
+                        
+                        # 转换为 RGB 并保存为高质量 JPEG (默认生成的可能是 RGBA 或 PNG 字节)
+                        if image_out.mode in ('RGBA', 'P'):
+                            image_out = image_out.convert('RGB')
+                        
+                        image_out.save(saved_path, "JPEG", quality=85, optimize=True)
                         break
                 
                 if saved_path:
