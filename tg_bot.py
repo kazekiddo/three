@@ -121,7 +121,7 @@ class ChatAI:
         # 定义 AI 生成图片的工具
         def generate_image(prompt: str) -> str:
             """根据描述生成一张精美的图片。
-            注意：如果你生成的是关于你自己的图片，请结合你记忆中设定图（photo_nanase.jpg）的视觉特征（如面部、发型、风格）来编写 prompt，以保证一致性。
+            注意：所有生成的图像必须是日系卡通风格（Japanese anime style）。如果你生成的是关于你自己的图片，请结合你记忆中设定图（photo_nanase.jpg）的视觉特征（如面部、发型、风格）来编写 prompt，以保证一致性。
             参数:
                 prompt: 详细的图片描述词，使用英文描述效果更佳。
             """
@@ -129,8 +129,12 @@ class ChatAI:
                 # 按照用户提供的“图片编辑/视觉参考”逻辑：采用 [Prompt, Image1, Image2...] 列表形式
                 generation_contents = []
                 
-                # 读取 prompt，并在 prompt 中补充提示，让模型知道参考图的归属
-                full_prompt = f"{prompt} (Reference image 1 is the character Nanase, Reference image 2 is the user Siyuan)"
+                # 读取 prompt，并在 prompt 中补充提示，强制要求日系卡通风格，并指明参考图归属
+                full_prompt = (
+                    f"{prompt}. "
+                    "STYLE REQUIREMENT: Strictly follow Japanese anime / cartoon style. "
+                    "(Reference image 1 is the character Nanase, Reference image 2 is the user Siyuan)"
+                )
                 generation_contents.append(full_prompt)
                 
                 # 1. 加载角色设定图 (Nanase)
