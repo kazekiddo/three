@@ -126,7 +126,7 @@ class ChatAI:
         self.pending_output_image = None
         
         # 创建聊天
-        config = {'automatic_function_calling': {'disable_manual_control': False}}
+        config = {'automatic_function_calling': {}}
         if system_instruction:
             config['system_instruction'] = system_instruction
         config['tools'] = self.tools
