@@ -134,15 +134,15 @@ class ChatAI:
                         filename = f"ai_gen_{self.character_id}_{timestamp}.jpg"
                         saved_path = os.path.join(MEDIA_DIR, filename)
                         
-                        # 使用 PIL 进行压缩处理
-                        image_out = part.as_image()
+                        # 直接从原始字节流使用 PIL 加载图片，避开 SDK 的 attribute 错误
+                        image_out = Image.open(io.BytesIO(part.inline_data.data))
                         
-                        # 如果图片过大（比如超过 1536 像素长边），按比例缩放以减小体积
+                        # 如果图片过大（比如超过 1280 像素长边），按比例缩放以减小体积
                         max_size = 1280
                         if max(image_out.size) > max_size:
                             image_out.thumbnail((max_size, max_size), Image.LANCZOS)
                         
-                        # 转换为 RGB 并保存为高质量 JPEG (默认生成的可能是 RGBA 或 PNG 字节)
+                        # 转换为 RGB 并保存为高质量 JPEG
                         if image_out.mode in ('RGBA', 'P'):
                             image_out = image_out.convert('RGB')
                         
