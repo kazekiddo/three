@@ -4,8 +4,10 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google import genai
+from google.genai import types
 from database import Database
 import datetime
+import io
 
 
 # 只记录错误日志
@@ -16,6 +18,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+# 确保媒体目录存在
+MEDIA_DIR = os.path.join(os.getcwd(), 'media', 'photos')
+os.makedirs(MEDIA_DIR, exist_ok=True)
 
 class ChatAI:
     def __init__(self, model="gemini-2.5-flash", api_key=None, system_instruction=None, character_id=None):
@@ -44,9 +50,20 @@ class ChatAI:
                 prefix = f"{msg['context_prefix']} " if msg.get('context_prefix') else ""
                 text_content = f"{prefix}{msg['content']}"
 
+                parts = [{'text': text_content}]
+                
+                # 如果有图片，从本地磁盘加载
+                if msg.get('media_path') and os.path.exists(msg['media_path']):
+                    try:
+                        with open(msg['media_path'], 'rb') as f:
+                            img_data = f.read()
+                        parts.append(types.Part.from_bytes(data=img_data, mime_type=msg.get('media_type', 'image/jpeg')))
+                    except Exception as e:
+                        logger.error(f"加载历史图片失败: {e}")
+
                 history.append({
                     'role': msg['role'],
-                    'parts': [{'text': text_content}]
+                    'parts': parts
                 })
         
         # 创建聊天
@@ -80,7 +97,7 @@ class ChatAI:
         else:
             self.chat = self.client.chats.create(model=self.model)
     
-    def send_message(self, message):
+    def send_message(self, message, image_data=None, image_mime_type=None, media_path=None):
         """发送消息并获取回复"""
         context_prefix = None
         
@@ -108,7 +125,13 @@ class ChatAI:
         
         # 保存用户消息，同步落库纯净和前置标签（如果有）
         if self.character_id:
-            self.db.save_message(self.character_id, 'user', message, self.model, context_prefix)
+            self.db.save_message(
+                self.character_id, 'user', message, 
+                model=self.model, 
+                context_prefix=context_prefix,
+                media_path=media_path,
+                media_type=image_mime_type
+            )
         
         # 向量检索核心记忆
         core_facts_text = ""
@@ -132,19 +155,13 @@ class ChatAI:
                 import logging
                 logging.getLogger(__name__).error(f"检索核心记忆失败: {e}")
 
-        # 拼接最终提交给 LLM 的增强上下文：
-        # 1. 临时系统时间锚点 (决定了流逝感)
-        # 2. 原始消息
-        # 3. 跨期长记忆碎片 (决定了记忆留存)
-        augmented_message = ""
-        if context_prefix:
-            augmented_message += f"{context_prefix}\n"
-        augmented_message += message
-        if core_facts_text:
-            augmented_message += core_facts_text
+        # 构造多模态消息 Parts
+        message_parts = [augmented_message]
+        if image_data:
+            message_parts.append(types.Part.from_bytes(data=image_data, mime_type=image_mime_type))
 
         # 获取AI回复
-        response = self.chat.send_message(augmented_message)
+        response = self.chat.send_message(message_parts)
         response_text = response.text if response.text else ""
         
         # 保存AI回复（只有非空时才保存）
@@ -249,7 +266,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
     
     user_id = update.effective_user.id
-    user_message = update.message.text
+    user_message = update.message.text or update.message.caption or ""
+    
+    image_data = None
+    image_mime_type = None
+    media_path = None
+    
+    # 如果有图片，处理图片
+    if update.message.photo:
+        # 获取最高分辨率的图片
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        
+        # 生成本地保存路径
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"user_{user_id}_{timestamp}.jpg"
+        media_path = os.path.join(MEDIA_DIR, filename)
+        
+        # 下载图片
+        image_bytes = await file.download_as_bytearray()
+        with open(media_path, 'wb') as f:
+            f.write(image_bytes)
+            
+        image_data = bytes(image_bytes)
+        image_mime_type = "image/jpeg"
+        
+        if not user_message:
+            user_message = "[用户发送了一张图片]"
     
     # 检查用户是否已选择角色
     if user_id not in user_chats:
@@ -259,7 +302,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # 获取AI回复
         chat_ai = user_chats[user_id]
-        response = chat_ai.send_message(user_message)
+        response = chat_ai.send_message(
+            user_message, 
+            image_data=image_data, 
+            image_mime_type=image_mime_type,
+            media_path=media_path
+        )
         
         # 按换行符拆分消息
         messages = response.split('\n')
@@ -335,7 +383,8 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("select", select_character))
     application.add_handler(CommandHandler("history", history))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # 更新过滤器，支持文字和图片（MESSAGE_TYPE.PHOTO）
+    application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_message))
     
     # 启动后台记忆任务
     async def memory_filter_job(context: ContextTypes.DEFAULT_TYPE):

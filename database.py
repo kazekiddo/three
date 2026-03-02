@@ -64,14 +64,14 @@ class Database:
             conn.commit()
             return character_id
     
-    def save_message(self, character_id, role, content, model=None, context_prefix=None):
+    def save_message(self, character_id, role, content, model=None, context_prefix=None, media_path=None, media_type=None):
         """保存聊天消息"""
         conn = self.connect()
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO chat_messages (character_id, role, content, context_prefix, model, timestamp) 
-                   VALUES (%s, %s, %s, %s, %s, %s)""",
-                (character_id, role, content, context_prefix, model, datetime.now())
+                """INSERT INTO chat_messages (character_id, role, content, context_prefix, model, media_path, media_type, timestamp) 
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (character_id, role, content, context_prefix, model, media_path, media_type, datetime.now())
             )
             conn.commit()
     
@@ -80,7 +80,7 @@ class Database:
         conn = self.connect()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """SELECT role, content, context_prefix, model, timestamp 
+                """SELECT role, content, context_prefix, model, media_path, media_type, timestamp 
                    FROM chat_messages 
                    WHERE character_id = %s 
                    ORDER BY timestamp DESC 
@@ -95,7 +95,7 @@ class Database:
         conn = self.connect()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """SELECT role, content, context_prefix, model, timestamp 
+                """SELECT role, content, context_prefix, model, media_path, media_type, timestamp 
                    FROM chat_messages 
                    WHERE character_id = %s 
                      AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '%s hours'

@@ -25,6 +25,8 @@ create table chat_messages
             check ((role)::text = ANY (ARRAY [('user'::character varying)::text, ('model'::character varying)::text])),
     content      text        not null,
     model        varchar(100),
+    media_path   varchar(255),
+    media_type   varchar(20),
     timestamp    timestamp default CURRENT_TIMESTAMP,
     is_extracted boolean   default false
 );
