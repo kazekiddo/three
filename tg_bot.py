@@ -40,8 +40,34 @@ class ChatAI:
         self.last_message_timestamp = None
         self.last_prefix_timestamp = None
         
+        # 预加载角色设定图 (用于视觉一致性)
+        self.character_photo_path = "/data/three/media/photos/photo_nanase.jpg"
+        character_photo_part = None
+        if os.path.exists(self.character_photo_path):
+            try:
+                with open(self.character_photo_path, 'rb') as f:
+                    photo_data = f.read()
+                character_photo_part = types.Part.from_bytes(data=photo_data, mime_type='image/jpeg')
+            except Exception as e:
+                logger.error(f"加载设定图出错: {e}")
+
         # 从数据库加载过去 24 小时的历史记录作为当天的缓冲区
         history = []
+        
+        # 如果有设定图，注入到历史记录的最开始，作为 AI 的“自我认知”
+        if character_photo_part:
+            history.append({
+                'role': 'user',
+                'parts': [
+                    {'text': "系统通知：以下是你的官方形象设定图（Self-Image Reference）。请仔细观察并分析你的外貌、发型、面部特征及穿着。在后续对话中，如果你需要生成关于自己的图片，请务必保持视觉一致。"},
+                    character_photo_part
+                ]
+            })
+            history.append({
+                'role': 'model',
+                'parts': [{'text': "我已经看到了我的设定图。我会记住我的面部特征和整体形象，并在需要生成我的照片时保持一致性。"}]
+            })
+
         if character_id:
             self.last_message_timestamp = self.db.get_last_message_timestamp(character_id)
             db_messages = self.db.get_recent_chat_history(character_id, hours=24)
@@ -66,25 +92,50 @@ class ChatAI:
                     'parts': parts
                 })
         
+        # 定义 AI 生成图片的工具
+        def generate_image(prompt: str) -> str:
+            """根据描述生成一张精美的图片。
+            注意：如果你生成的是关于你自己的图片，请结合你记忆中设定图（photo_nanase.jpg）的视觉特征（如面部、发型、风格）来编写 prompt，以保证一致性。
+            参数:
+                prompt: 详细的图片描述词，使用英文描述效果更佳。
+            """
+            try:
+                # 调用 gemini-3.1-flash-image-preview 生成图片
+                response = self.client.models.generate_image(
+                    model='gemini-3.1-flash-image-preview',
+                    prompt=prompt,
+                    config=types.GenerateImageConfig(output_mime_type='image/jpeg')
+                )
+                image_bytes = response.generated_images[0].image_bytes
+                
+                # 保存图片到磁盘
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"ai_gen_{self.character_id}_{timestamp}.jpg"
+                save_path = os.path.join(MEDIA_DIR, filename)
+                with open(save_path, 'wb') as f:
+                    f.write(image_bytes)
+                
+                # 暂时存入实例状态，等待 send_message 结束后读取
+                self.pending_output_image = save_path
+                return f"图片已生成并准备发送，路径为: {save_path}。请继续你的对话，并告知用户图片已准备好。"
+            except Exception as e:
+                logger.error(f"AI 生成图片失败: {e}")
+                return f"生成图片失败: {str(e)}"
+
+        self.tools = [generate_image]
+        self.pending_output_image = None
+        
         # 创建聊天
-        if system_instruction and history:
-            self.chat = self.client.chats.create(
-                model=model,
-                config={'system_instruction': system_instruction},
-                history=history
-            )
-        elif system_instruction:
-            self.chat = self.client.chats.create(
-                model=model,
-                config={'system_instruction': system_instruction}
-            )
-        elif history:
-            self.chat = self.client.chats.create(
-                model=model,
-                history=history
-            )
-        else:
-            self.chat = self.client.chats.create(model=model)
+        config = {'automatic_function_calling': {'disable_manual_control': False}}
+        if system_instruction:
+            config['system_instruction'] = system_instruction
+        config['tools'] = self.tools
+
+        self.chat = self.client.chats.create(
+            model=model,
+            config=config,
+            history=history
+        )
             
     def clear_history(self):
         """每天凌晨清空一次内存中的长对话列表"""
@@ -166,6 +217,9 @@ class ChatAI:
         if core_facts_text:
             augmented_message += core_facts_text
 
+        # 重置待处理图片
+        self.pending_output_image = None
+
         # 构造多模态消息 Parts
         message_parts = [augmented_message]
         if image_data:
@@ -175,13 +229,21 @@ class ChatAI:
         response = self.chat.send_message(message_parts)
         response_text = response.text if response.text else ""
         
+        # 提取生成图片的路径（如果有的话）
+        image_path = self.pending_output_image
+        
         # 保存AI回复（只有非空时才保存）
-        if self.character_id and response_text.strip():
-            self.db.save_message(self.character_id, 'model', response_text, self.model)
+        if self.character_id and (response_text.strip() or image_path):
+            self.db.save_message(
+                self.character_id, 'model', response_text, 
+                model=self.model,
+                media_path=image_path,
+                media_type='image/jpeg' if image_path else None
+            )
             # 同样更新内存中的最后互动时间，确保 30 分钟判断更精准
             self.last_message_timestamp = datetime.datetime.now()
         
-        return response_text
+        return response_text, image_path
 
 # 全局变量存储每个用户的聊天实例
 user_chats = {}
@@ -313,12 +375,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # 获取AI回复
         chat_ai = user_chats[user_id]
-        response = chat_ai.send_message(
+        response, ai_image_path = chat_ai.send_message(
             user_message, 
             image_data=image_data, 
             image_mime_type=image_mime_type,
             media_path=media_path
         )
+        
+        # 如果 AI 生成了图片，先发送图片
+        if ai_image_path and os.path.exists(ai_image_path):
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id, 
+                photo=open(ai_image_path, 'rb'),
+                caption="这就是为你生成的图片~"
+            )
         
         # 按换行符拆分消息
         messages = response.split('\n')
