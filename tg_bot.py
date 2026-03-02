@@ -115,10 +115,16 @@ class ChatAI:
                     except Exception as e:
                         logger.error(f"加载设定图为 PIL 对象失败: {e}")
 
-                # 调用 gemini-3.1-flash-image-preview 生成图片
+                # 调用 gemini-3.1-flash-image-preview 生成图片，并设置分辨率为 1K 以减小体积
                 response = self.client.models.generate_content(
                     model='gemini-3.1-flash-image-preview',
                     contents=generation_contents,
+                    config=types.GenerateContentConfig(
+                        image_config=types.ImageConfig(
+                            aspect_ratio="3:4",
+                            image_size="1K"
+                        )
+                    )
                 )
                 
                 saved_path = None
