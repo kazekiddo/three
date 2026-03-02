@@ -155,6 +155,17 @@ class ChatAI:
                 import logging
                 logging.getLogger(__name__).error(f"检索核心记忆失败: {e}")
 
+        # 拼接最终提交给 LLM 的增强上下文：
+        # 1. 临时系统时间锚点 (决定了流逝感)
+        # 2. 原始消息
+        # 3. 跨期长记忆碎片 (决定了记忆留存)
+        augmented_message = ""
+        if context_prefix:
+            augmented_message += f"{context_prefix}\n"
+        augmented_message += message
+        if core_facts_text:
+            augmented_message += core_facts_text
+
         # 构造多模态消息 Parts
         message_parts = [augmented_message]
         if image_data:
