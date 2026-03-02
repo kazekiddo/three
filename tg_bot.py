@@ -8,6 +8,7 @@ from google.genai import types
 from database import Database
 import datetime
 import io
+from PIL import Image
 
 
 # 只记录错误日志
@@ -100,18 +101,19 @@ class ChatAI:
                 prompt: 详细的图片描述词，使用英文描述效果更佳。
             """
             try:
-                # 构建带有视觉参考的消息内容
+                # 按照用户提供的“图片编辑/视觉参考”逻辑：采用 [Prompt, Image] 列表形式
                 generation_contents = []
                 
-                # 尝试加载设定图作为视觉参考
-                if os.path.exists(self.character_photo_path):
-                    with open(self.character_photo_path, 'rb') as f:
-                        ref_photo_data = f.read()
-                    generation_contents.append(types.Part.from_bytes(data=ref_photo_data, mime_type='image/jpeg'))
-                    generation_contents.append(types.Part.from_text(text="Above is your official character setting image. Please use its facial features, hair style, and overall aesthetics as a strict reference for the new image."))
+                # 读取 prompt
+                generation_contents.append(prompt)
                 
-                # 加入用户请求的 Prompt
-                generation_contents.append(types.Part.from_text(text=f"Task: Generate a new image based on this prompt while maintaining the character consistency: {prompt}"))
+                # 如果有设定图，作为第二个 part (即 Image) 传入，用于引导生成
+                if os.path.exists(self.character_photo_path):
+                    try:
+                        ref_image = Image.open(self.character_photo_path)
+                        generation_contents.append(ref_image)
+                    except Exception as e:
+                        logger.error(f"加载设定图为 PIL 对象失败: {e}")
 
                 # 调用 gemini-3.1-flash-image-preview 生成图片
                 response = self.client.models.generate_content(
@@ -122,20 +124,19 @@ class ChatAI:
                 saved_path = None
                 for part in response.parts:
                     if part.inline_data is not None:
-                        # 保存图片到磁盘
+                        # 使用用户示范的 as_image() 方法保存图片
                         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                         filename = f"ai_gen_{self.character_id}_{timestamp}.png"
                         saved_path = os.path.join(MEDIA_DIR, filename)
                         
-                        # 直接写入二进制数据
-                        with open(saved_path, 'wb') as f:
-                            f.write(part.inline_data.data)
+                        image_out = part.as_image()
+                        image_out.save(saved_path)
                         break
                 
                 if saved_path:
                     # 记录待发送的图片路径
                     self.pending_output_image = saved_path
-                    return f"图片已生成，保存路径为: {saved_path}。画面已参考你的设定图进行面部一致性处理。"
+                    return f"图片已基于设定图特征生成。路径: {saved_path}"
                 else:
                     return "模型未返回图片内容，请重试或检查 prompt。"
             except Exception as e:
