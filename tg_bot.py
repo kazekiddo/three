@@ -213,15 +213,18 @@ class ChatAI:
         )
             
     def clear_history(self):
-        """每天凌晨清空一次内存中的长对话列表"""
+        """每天凌晨清空一次内存中的长对话列表，同时保留工具能力"""
         logger.info(f"正在清空角色 {self.character_id} 的短期对话感知缓冲...")
+        
+        config = {'automatic_function_calling': {}}
         if self.system_instruction:
-            self.chat = self.client.chats.create(
-                model=self.model,
-                config={'system_instruction': self.system_instruction}
-            )
-        else:
-            self.chat = self.client.chats.create(model=self.model)
+            config['system_instruction'] = self.system_instruction
+        config['tools'] = self.tools
+
+        self.chat = self.client.chats.create(
+            model=self.model,
+            config=config
+        )
     
     def send_message(self, message, image_data=None, image_mime_type=None, media_path=None):
         """发送消息并获取回复"""
