@@ -65,6 +65,8 @@ class ChatAI:
 
         # 从数据库加载过去 24 小时的历史记录作为当天的缓冲区
         history = []
+        # base_history 保存设定图注入、每次 clear_history 后复用
+        self.base_history = []
         
         # 1. 注入角色设定图
         if character_photo_part:
@@ -79,6 +81,7 @@ class ChatAI:
                 'role': 'model',
                 'parts': [{'text': "我已经看到了我的设定图。我会记住我的面部特征和整体形象，并在需要生成我的照片时保持一致性。"}]
             })
+            self.base_history = list(history)  # 浅拷贝当前的设定图条目
 
         # 2. 注入用户（思远）设定图
         if user_photo_part:
@@ -93,6 +96,7 @@ class ChatAI:
                 'role': 'model',
                 'parts': [{'text': "收到了，我已经看到了思远的肖像图。我会记住他的样子。"}]
             })
+            self.base_history = list(history)  # 更新，包含两张设定图
 
         # 从数据库加载动态缓冲：0-4点加载前一天4点后的记录；5-23点加载当天4点后的记录
         if character_id:
@@ -234,7 +238,8 @@ class ChatAI:
 
         self.chat = self.client.chats.create(
             model=self.model,
-            config=config
+            config=config,
+            history=self.base_history
         )
     
     def send_message(self, message, image_data=None, image_mime_type=None, media_path=None):
