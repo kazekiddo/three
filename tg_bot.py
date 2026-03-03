@@ -480,7 +480,7 @@ class ChatAI:
         now_dt = datetime.datetime.now()
         weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
         weekday_str = weekdays[now_dt.weekday()]
-        current_time_str = now_dt.strftime(f"%Y年%m月%d日 {weekday_str} %H:%M")
+        current_time_str = now_dt.strftime(f"%Y年%m月%d日 {weekday_str} %H:%M:%S")
 
         # 触发提示：以特殊标记开头，便于事后从 chat history 中识别并移除
         trigger_msg = (
@@ -516,12 +516,23 @@ class ChatAI:
             pass
 
         image_path = self.pending_output_image
+        
+        # 构造落库用的时间感知前缀 (遵循 30 分钟规则，避免连发时标签堆叠)
+        context_prefix = None
+        if (not self.last_message_timestamp or 
+            (now_dt - self.last_message_timestamp).total_seconds() > 1800 or 
+            not self.last_prefix_timestamp or 
+            (now_dt - self.last_prefix_timestamp).total_seconds() > 1800):
+            
+            context_prefix = f"[系统时间感知：当前时间 {current_time_str}]"
+            self.last_prefix_timestamp = now_dt
 
         # 只落库 model 侧消息
         if self.character_id and (response_text.strip() or image_path):
             self.db.save_message(
                 self.character_id, 'model', response_text,
                 model=self.model,
+                context_prefix=context_prefix,
                 media_path=image_path,
                 media_type='image/jpeg' if image_path else None
             )
