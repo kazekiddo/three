@@ -134,6 +134,7 @@ class ChatAI:
         self.system_instruction = system_instruction
         self.db = Database()
         self.last_message_timestamp = None
+        self.last_user_message_timestamp = None  # 只在用户发消息时更新，供主动发言的 30 分钟门槛使用
         self.last_prefix_timestamp = None
         
         # 预加载角色设定图和用户（思远）设定图 (用于视觉一致性)
@@ -360,8 +361,9 @@ class ChatAI:
                 # 更新上一次插入时间后缀的锚点
                 self.last_prefix_timestamp = now_dt
             
-            # 更新上次说话时间为本次
+            # 更新上次说话时间（用户侧）
             self.last_message_timestamp = now_dt
+            self.last_user_message_timestamp = now_dt  # 只有用户说话才更新这个
         
         # 保存用户消息，同步落库纯净和前置标签（如果有）
         if self.character_id:
@@ -784,15 +786,17 @@ def evaluate_proactive_intent(chat_ai, silence_seconds: float):
     else:
         silence_desc = f"已经超过一天（{silence_hours:.0f} 小时）没有消息了"
 
-    # 抓取最近几条对话作为上下文，让 AI 有话题感
+    # 以用户最近 4 句里最早那条为时间锚点，拉出从那时到现在的完整对话链
+    # 这样即使 AI 连续主动发了很多条，用户声音和完整对话上下文也不会丢失
     recent_context = ""
     try:
-        recent_msgs = chat_ai.db.get_chat_history(chat_ai.character_id, limit=4)
-        if recent_msgs:
+        context_msgs = chat_ai.db.get_context_since_nth_user_message(chat_ai.character_id, user_msg_count=4)
+        if context_msgs:
             recent_context = "\n最近的对话片段：\n"
-            for msg in recent_msgs:
+            for msg in context_msgs:
                 role_name = "思远" if msg['role'] == 'user' else "你"
-                recent_context += f"  {role_name}: {msg['content'][:80]}\n"
+                time_str = msg['timestamp'].strftime('%H:%M') if msg.get('timestamp') else ''
+                recent_context += f"  [{time_str}] {role_name}: {msg['content'][:80]}\n"
     except Exception:
         pass
 
@@ -849,15 +853,16 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
 
         for user_id, chat_ai in list(user_chats.items()):
             try:
-                last_ts = chat_ai.last_message_timestamp
-                silence_seconds = (now_dt - last_ts).total_seconds() if last_ts else 86400
+                # 用用户最后说话时间计算沉默时长，AI 主动发言不重置这个门槛
+                last_user_ts = chat_ai.last_user_message_timestamp
+                user_silence_seconds = (now_dt - last_user_ts).total_seconds() if last_user_ts else 86400
 
-                # 沉默不足 30 分钟，不考虑主动打扰
-                if silence_seconds < 1800:
+                # 用户刚说过话（30 分钟内），不主动打扰；AI 自己发的不算
+                if user_silence_seconds < 1800:
                     continue
 
                 # 意愿评估（同步调用，独立 client，不污染 chat history）
-                should_send, trigger_hint = evaluate_proactive_intent(chat_ai, silence_seconds)
+                should_send, trigger_hint = evaluate_proactive_intent(chat_ai, user_silence_seconds)
                 if not should_send:
                     continue
 

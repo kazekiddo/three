@@ -149,6 +149,39 @@ class Database:
              res = cur.fetchone()
              return res[0] if res else None
 
+
+    def get_context_since_nth_user_message(self, character_id, user_msg_count=4):
+        """以用户最近 user_msg_count 句发言中最早那条的时间点为锚，
+        返回从那个时间点到现在的所有对话（user + model 都包含）。
+        即使 AI 连续主动发了很多条，用户的声音和完整对话链路也不会丢失。
+        """
+        conn = self.connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 第一步：找用户最近 user_msg_count 条消息，取最早的时间戳
+            cur.execute(
+                """SELECT timestamp FROM chat_messages
+                   WHERE character_id = %s AND role = 'user'
+                   ORDER BY timestamp DESC
+                   LIMIT %s""",
+                (character_id, user_msg_count)
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return []
+
+            since_time = min(r['timestamp'] for r in rows)
+
+            # 第二步：从那个时间点到现在，拉出所有消息（含 AI 回复和主动发言）
+            cur.execute(
+                """SELECT role, content, timestamp
+                   FROM chat_messages
+                   WHERE character_id = %s AND timestamp >= %s
+                   ORDER BY timestamp ASC""",
+                (character_id, since_time)
+            )
+            return cur.fetchall()
+
+
     def save_episodic_memory(self, character_id, content, emotion_intensity, promotion_candidate=True, embedding=None, event_time=None):
         """保存提纯后的情景记忆（含向量和事件时间）"""
         conn = self.connect()
