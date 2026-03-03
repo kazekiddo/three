@@ -94,9 +94,21 @@ class ChatAI:
                 'parts': [{'text': "收到了，我已经看到了思远的肖像图。我会记住他的样子。"}]
             })
 
+        # 从数据库加载动态缓冲：0-4点加载前一天4点后的记录；5-23点加载当天4点后的记录
+        history = []
         if character_id:
             self.last_message_timestamp = self.db.get_last_message_timestamp(character_id)
-            db_messages = self.db.get_recent_chat_history(character_id, hours=24)
+            
+            # 计算回溯小时数，以凌晨 4 点为隔离锚点
+            now = datetime.datetime.now()
+            if now.hour < 4:
+                # 0-3点时，需要回溯到前一天的 4 点
+                history_hours = now.hour + 20 
+            else:
+                # 4点后，只需回溯到今天的 4 点
+                history_hours = now.hour - 4
+            
+            db_messages = self.db.get_recent_chat_history(character_id, hours=history_hours)
             for msg in db_messages:
                 # 若数据库中有单独的时间锚点缓存，提取并包裹
                 prefix = f"{msg['context_prefix']} " if msg.get('context_prefix') else ""
