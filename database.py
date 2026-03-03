@@ -149,16 +149,44 @@ class Database:
              res = cur.fetchone()
              return res[0] if res else None
 
-    def save_episodic_memory(self, character_id, content, emotion_intensity, promotion_candidate=True):
-        """保存提纯后的情景记忆"""
+    def save_episodic_memory(self, character_id, content, emotion_intensity, promotion_candidate=True, embedding=None, event_time=None):
+        """保存提纯后的情景记忆（含向量和事件时间）"""
         conn = self.connect()
-        with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO episodic_memories (character_id, content, emotion_intensity, promotion_candidate)
-                   VALUES (%s, %s, %s, %s)""",
-                (character_id, content, emotion_intensity, promotion_candidate)
-            )
-            conn.commit()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO episodic_memories (character_id, content, emotion_intensity, promotion_candidate, embedding, event_time)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (character_id, content, emotion_intensity, promotion_candidate,
+                     np.array(embedding) if embedding is not None else None,
+                     event_time)
+                )
+                conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
+
+    def search_episodic_memories(self, character_id, query_embedding, limit=5):
+        """向量检索最相关的情景记忆，按相似度×时间衰减排序"""
+        conn = self.connect()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # 综合排序：余弦相似度 × 时间衰减因子（半衰期30天）
+                # 越近期的记忆权重越高，但语义相关性仍是主导因素
+                cur.execute(
+                    """SELECT id, content, emotion_intensity, event_time, created_at,
+                              1 - (embedding <=> %s::vector) AS similarity
+                       FROM episodic_memories 
+                       WHERE character_id = %s 
+                         AND embedding IS NOT NULL
+                       ORDER BY (1 - (embedding <=> %s::vector)) * EXP(-0.023 * EXTRACT(EPOCH FROM (NOW() - COALESCE(event_time, created_at))) / 86400) DESC
+                       LIMIT %s""",
+                    (np.array(query_embedding), character_id, np.array(query_embedding), limit)
+                )
+                return cur.fetchall()
+        except Exception as e:
+            conn.rollback()
+            raise e
 
     def get_all_characters_with_episodic(self):
          """获取所有有情景记忆的角色 ID"""

@@ -273,8 +273,9 @@ class ChatAI:
                 media_type=image_mime_type
             )
         
-        # 向量检索核心记忆
+        # 向量检索核心记忆 + 情景记忆
         core_facts_text = ""
+        episodic_text = ""
         if self.character_id:
             try:
                 # 获取消息的 embedding 用于检索
@@ -291,9 +292,19 @@ class ChatAI:
                     for i, fact in enumerate(core_facts):
                         evidence = f" (依据: {fact['evidence_span']})" if fact.get('evidence_span') else ""
                         core_facts_text += f"{i+1}. {fact['fact_text']}{evidence}\n"
+                
+                # 调取最相关的5条情景记忆（具体事件、时间线）
+                episodic_memories = self.db.search_episodic_memories(self.character_id, embedding, limit=5)
+                if episodic_memories:
+                    episodic_text = "\n\n[系统附加情景回忆：过去发生的相关事件（供参考，可自然地融入回答）]\n"
+                    for i, mem in enumerate(episodic_memories):
+                        time_str = ""
+                        if mem.get('event_time'):
+                            time_str = f" [{mem['event_time'].strftime('%Y年%m月%d日 %H:%M')}]"
+                        episodic_text += f"{i+1}.{time_str} {mem['content']}\n"
             except Exception as e:
                 import logging
-                logging.getLogger(__name__).error(f"检索核心记忆失败: {e}")
+                logging.getLogger(__name__).error(f"检索记忆失败: {e}")
 
         # 拼接最终提交给 LLM 的增强上下文：
         # 1. 临时系统时间锚点 (决定了流逝感)
@@ -305,6 +316,8 @@ class ChatAI:
         augmented_message += message
         if core_facts_text:
             augmented_message += core_facts_text
+        if episodic_text:
+            augmented_message += episodic_text
 
         # 重置待处理图片
         self.pending_output_image = None

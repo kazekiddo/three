@@ -48,13 +48,18 @@ class MemoryWorker:
                     conversation += f"{prefix}{m['role']}: {m['content']}\n"
                 
                 prompt = (
-                    "分析以下对话，提取其中值得记忆的核心情景和用户状态。\n"
-                    "如果是纯日常寒暄或废话，忽略即可。\n"
+                    "分析以下对话，提取其中值得记忆的情景事件和用户状态。\n"
+                    "要求：\n"
+                    "1. 必须保留事件的时间信息。对话中的 [系统时间感知] 标签包含了精确时间，请据此推断每个事件大致发生的时间。\n"
+                    "2. content 中必须包含时间上下文，例如'2026年3月2日晚上，用户去了游乐场玩，感到很开心'。\n"
+                    "3. 不要只提取抽象的人格特质，具体的事件（去了哪里、做了什么、和谁一起）同样重要。\n"
+                    "4. 如果是纯日常寒暄或无意义的废话，忽略即可。\n\n"
                     f"对话记录：\n{conversation}\n\n"
                     "请以JSON格式返回（数组），每个对象包含：\n"
-                    "- content: 提纯后的事实，例如'用户因为工作压力大而失眠'\n"
+                    "- content: 提纯后的事实描述（必须包含时间上下文），例如'2026年3月2日晚上，用户去了游乐场，坐了过山车，说很刺激'\n"
+                    "- event_time: 事件发生的大致时间，ISO 8601格式（如'2026-03-02T20:00:00'），如果无法推断则为null\n"
                     "- emotion_intensity: 1-10的情绪评分\n"
-                    "- promotion_candidate: 是否可能反映长期人格（涉及童年、偏好、习惯等为true，纯废话为false）\n"
+                    "- promotion_candidate: 是否可能反映长期人格特质（涉及童年、偏好、习惯等为true，单次事件为false）\n"
                 )
 
                 try:
@@ -70,14 +75,36 @@ class MemoryWorker:
                     if response.text:
                         results = json.loads(response.text)
                         for res in results:
-                            # 忽略纯废话或明确被拒绝的提升
-                            if not res.get('content') or not res.get('promotion_candidate'):
+                            content = res.get('content')
+                            if not content:
                                 continue
+                            
+                            # 为情景记忆生成 embedding，用于后续向量检索
+                            try:
+                                embed_res = self.client.models.embed_content(
+                                    model='gemini-embedding-001',
+                                    contents=content
+                                )
+                                embedding = embed_res.embeddings[0].values
+                            except Exception as e:
+                                logger.error(f"生成情景记忆 embedding 失败: {e}")
+                                embedding = None
+
+                            # 解析事件时间
+                            event_time = None
+                            if res.get('event_time'):
+                                try:
+                                    event_time = datetime.fromisoformat(res['event_time'])
+                                except (ValueError, TypeError):
+                                    pass
+
                             self.db.save_episodic_memory(
                                 character_id=cid,
-                                content=res['content'],
+                                content=content,
                                 emotion_intensity=float(res.get('emotion_intensity', 5.0)),
-                                promotion_candidate=res.get('promotion_candidate', True)
+                                promotion_candidate=res.get('promotion_candidate', False),
+                                embedding=embedding,
+                                event_time=event_time
                             )
                 except Exception as e:
                     logger.error(f"提取情景记忆失败 对于角色 {cid}: {e}")
