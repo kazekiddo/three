@@ -39,31 +39,41 @@ class HelperAI:
         history = []
         # 根据模式加载视觉参考
         if mode in ['gen_me', 'gen_both'] and os.path.exists(CHARACTER_PHOTO_PATH):
-            img = Image.open(CHARACTER_PHOTO_PATH)
+            with open(CHARACTER_PHOTO_PATH, 'rb') as f:
+                char_data = f.read()
             history.append({
                 'role': 'user',
-                'parts': [{'text': "This is the character (Nanase) reference."}, img]
+                'parts': [
+                    types.Part.from_text(text="This is the character (Nanase) reference."),
+                    types.Part.from_bytes(data=char_data, mime_type="image/jpeg")
+                ]
             })
             history.append({
                 'role': 'model',
-                'parts': [{'text': "I have received Nanase's reference. I will maintain consistency."}]
+                'parts': [types.Part.from_text(text="I have received Nanase's reference. I will maintain consistency.")]
             })
             
         if mode in ['gen_user', 'gen_both'] and os.path.exists(USER_PHOTO_PATH):
-            img = Image.open(USER_PHOTO_PATH)
+            with open(USER_PHOTO_PATH, 'rb') as f:
+                u_data = f.read()
             history.append({
                 'role': 'user',
-                'parts': [{'text': "This is the user (Siyuan) reference."}, img]
+                'parts': [
+                    types.Part.from_text(text="This is the user (Siyuan) reference."),
+                    types.Part.from_bytes(data=u_data, mime_type="image/jpeg")
+                ]
             })
             history.append({
                 'role': 'model',
-                'parts': [{'text': "I have received Siyuan's reference. I will maintain consistency."}]
+                'parts': [types.Part.from_text(text="I have received Siyuan's reference. I will maintain consistency.")]
             })
 
+        # 按照官网最新文档：设置 response_modalities 为 ['TEXT', 'IMAGE']
         self.chat = self.client.chats.create(
             model='gemini-3.1-flash-image-preview',
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
+                response_modalities=['TEXT', 'IMAGE'],
                 image_config=types.ImageConfig(aspect_ratio="3:4")
             ),
             history=history
