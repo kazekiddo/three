@@ -74,8 +74,8 @@ class HelperAI:
         # 强制要求日系卡通风格
         full_prompt = f"{prompt}. STYLE REQUIREMENT: Strictly follow Japanese anime / cartoon style."
         
-        # 统一使用显式格式发送消息，增强兼容性
-        response = self.chat.send_message([{'text': full_prompt}])
+        # 按照 SDK 要求，直接发送单个 Part 的列表或单独的内容对象
+        response = self.chat.send_message(types.Part.from_text(text=full_prompt))
         
         for part in response.parts:
             if part.inline_data is not None:
