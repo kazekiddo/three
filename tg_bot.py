@@ -197,6 +197,7 @@ class ChatAI:
         # 从数据库加载动态缓冲：0-4点加载前一天4点后的记录；5-23点加载当天4点后的记录
         if character_id:
             self.last_message_timestamp = self.db.get_last_message_timestamp(character_id)
+            self.last_user_message_timestamp = self.db.get_last_user_message_timestamp(character_id)
             
             # 计算起始时间，以凌晨 4 点为隔离锚点
             now = datetime.datetime.now()
@@ -764,27 +765,28 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='HTML')
 
 
-def evaluate_proactive_intent(chat_ai, silence_seconds: float):
+def evaluate_proactive_intent(chat_ai, user_silence_seconds: float, total_silence_seconds: float):
     """独立调用 Gemini 评估 AI 此刻是否想主动联系用户。
-    使用独立 client + 无状态调用，不污染主 chat history。
-    返回 (should_send: bool, trigger_hint: str)
+    - user_silence_seconds: 距离用户最后一次发言的时长
+    - total_silence_seconds: 距离最后一次对话（含 AI 主动发言）的时长
     """
     now_dt = datetime.datetime.now()
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     weekday_str = weekdays[now_dt.weekday()]
     current_time_str = now_dt.strftime(f"%Y年%m月%d日 {weekday_str} %H:%M")
 
-    silence_hours = silence_seconds / 3600
-    if silence_hours < 1:
-        silence_desc = f"你们 {int(silence_seconds / 60)} 分钟前刚聊过"
-    elif silence_hours < 4:
-        silence_desc = f"已经有 {silence_hours:.1f} 小时没联系了"
-    elif silence_hours < 12:
-        silence_desc = f"今天还没怎么说话，已经 {silence_hours:.1f} 小时了"
-    elif silence_hours < 24:
-        silence_desc = f"今天几乎没有对话，沉默了 {silence_hours:.1f} 小时"
+    # 用户沉默描述
+    u_silence_hours = user_silence_seconds / 3600
+    if u_silence_hours < 4:
+        user_desc = f"思远已经有 {u_silence_hours:.1f} 小时没理你了"
     else:
-        silence_desc = f"已经超过一天（{silence_hours:.0f} 小时）没有消息了"
+        user_desc = f"思远今天已经很长时间（{u_silence_hours:.1f} 小时）没和你说话了"
+
+    # 总沉默描述（控制频率）
+    if total_silence_seconds < 3600:
+        total_desc = f"而你大约 {int(total_silence_seconds / 60)} 分钟前刚找过他"
+    else:
+        total_desc = f"距离你们最后一次互动也过了 {total_silence_seconds / 3600:.1f} 小时了"
 
     # 以用户最近 4 句里最早那条为时间锚点，拉出从那时到现在的完整对话链
     # 这样即使 AI 连续主动发了很多条，用户声音和完整对话上下文也不会丢失
@@ -802,9 +804,11 @@ def evaluate_proactive_intent(chat_ai, silence_seconds: float):
 
     prompt = (
         f"现在是 {current_time_str}。\n"
-        f"{silence_desc}。{recent_context}\n"
+        f"{user_desc}，{total_desc}。\n"
+        f"{recent_context}\n"
         f"请思考：此刻你是否想主动给思远发一条消息？\n"
-        f"考虑因素：当前时间是否合适、是否有话想说、不要打扰对方太频繁。\n"
+        f"考虑因素：当前时间是否合适、思远的状态、你之前的发言频率、是否有新的话题。\n"
+        f"注意：即使他没回你，你也可以根据你的性格（粘人、关心或随意）决定是否继续找他，但不要让他感到烦躁。\n"
         f"只回答 YES 或 NO，不要输出任何其他内容。"
     )
 
@@ -822,7 +826,8 @@ def evaluate_proactive_intent(chat_ai, silence_seconds: float):
         )
         answer = response.text.strip().upper()
         should_send = answer.startswith("YES")
-        return should_send, silence_desc + "。"
+        trigger_hint = f"{user_desc}，{total_desc}。"
+        return should_send, trigger_hint
     except Exception as e:
         logger.error(f"意愿评估失败: {e}")
         return False, ""
@@ -857,12 +862,16 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                 last_user_ts = chat_ai.last_user_message_timestamp
                 user_silence_seconds = (now_dt - last_user_ts).total_seconds() if last_user_ts else 86400
 
+                # 增加总互动沉默时长，用于 AI 评估频率
+                last_total_ts = chat_ai.last_message_timestamp
+                total_silence_seconds = (now_dt - last_total_ts).total_seconds() if last_total_ts else 86400
+
                 # 用户刚说过话（30 分钟内），不主动打扰；AI 自己发的不算
                 if user_silence_seconds < 1800:
                     continue
 
                 # 意愿评估（同步调用，独立 client，不污染 chat history）
-                should_send, trigger_hint = evaluate_proactive_intent(chat_ai, user_silence_seconds)
+                should_send, trigger_hint = evaluate_proactive_intent(chat_ai, user_silence_seconds, total_silence_seconds)
                 if not should_send:
                     continue
 

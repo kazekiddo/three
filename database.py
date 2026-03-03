@@ -149,6 +149,19 @@ class Database:
              res = cur.fetchone()
              return res[0] if res else None
 
+    def get_last_user_message_timestamp(self, character_id):
+        """获取该角色用户（role='user'）最后一次发言的时间，用于 proactive 30 分钟门槛的持久化恢复。"""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT timestamp FROM chat_messages
+                   WHERE character_id = %s AND role = 'user'
+                   ORDER BY timestamp DESC LIMIT 1""",
+                (character_id,)
+            )
+            res = cur.fetchone()
+            return res[0] if res else None
+
 
     def get_context_since_nth_user_message(self, character_id, user_msg_count=4):
         """以用户最近 user_msg_count 句发言中最早那条的时间点为锚，
