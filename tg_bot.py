@@ -636,9 +636,6 @@ def main():
         except Exception as e:
             logger.error(f"清空聊天列表失败: {e}")
 
-    # 系统启动后 10 秒执行一次提纯，清理历史遗留并且无需等待到半夜
-    job_queue.run_once(memory_filter_job, when=10)
-
     # 每天凌晨三点（北京时间 UTC+8）执行一次提纯。UTC 19:00 是北京时间 03:00
     filter_time = datetime.time(hour=19, minute=0, second=0, tzinfo=datetime.timezone.utc)
     job_queue.run_daily(memory_filter_job, time=filter_time)
