@@ -433,13 +433,25 @@ class ChatAI:
         if image_data:
             message_parts.append(types.Part.from_bytes(data=image_data, mime_type=image_mime_type))
 
-        # 获取AI回复，过滤掉模型的思考过程（THOUGHT part）
+        # 获取AI回复（automatic_function_calling 在 send_message 内部自动完成，response 是最终响应）
         response = self.chat.send_message(message_parts)
         response_text = ""
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if part.text and not part.text.strip().startswith("THOUGHT"):
                     response_text += part.text
+        
+        # 从 chat history 中清除记忆块，避免 token 累积
+        # 记忆只在当前轮对模型可见，发送后即清除
+        try:
+            for content in reversed(self.chat._curated_history):
+                if content.role == 'user':
+                    for part in content.parts:
+                        if hasattr(part, 'text') and part.text and '\n\n[系统附加' in part.text:
+                            part.text = part.text[:part.text.index('\n\n[系统附加')]
+                    break
+        except Exception:
+            pass
         
         # 提取生成图片的路径（如果有的话）
         image_path = self.pending_output_image
