@@ -95,20 +95,19 @@ class ChatAI:
             })
 
         # 从数据库加载动态缓冲：0-4点加载前一天4点后的记录；5-23点加载当天4点后的记录
-        history = []
         if character_id:
             self.last_message_timestamp = self.db.get_last_message_timestamp(character_id)
             
-            # 计算回溯小时数，以凌晨 4 点为隔离锚点
+            # 计算起始时间，以凌晨 4 点为隔离锚点
             now = datetime.datetime.now()
             if now.hour < 4:
                 # 0-3点时，需要回溯到前一天的 4 点
-                history_hours = now.hour + 20 
+                since_time = (now - datetime.timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
             else:
                 # 4点后，只需回溯到今天的 4 点
-                history_hours = now.hour - 4
+                since_time = now.replace(hour=4, minute=0, second=0, microsecond=0)
             
-            db_messages = self.db.get_recent_chat_history(character_id, hours=history_hours)
+            db_messages = self.db.get_recent_chat_history(character_id, since_time=since_time)
             for msg in db_messages:
                 # 若数据库中有单独的时间锚点缓存，提取并包裹
                 prefix = f"{msg['context_prefix']} " if msg.get('context_prefix') else ""

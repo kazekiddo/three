@@ -94,17 +94,17 @@ class Database:
             messages = cur.fetchall()
             return list(reversed(messages))
 
-    def get_recent_chat_history(self, character_id, hours=24):
-        """获取过去N小时内的完整对话历史，用于每日充当感知缓冲层"""
+    def get_recent_chat_history(self, character_id, since_time):
+        """获取指定时间点之后的完整对话历史，用于每日充当感知缓冲层"""
         conn = self.connect()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """SELECT role, content, context_prefix, model, media_path, media_type, timestamp 
                    FROM chat_messages 
                    WHERE character_id = %s 
-                     AND timestamp >= CURRENT_TIMESTAMP - INTERVAL '%s hours'
+                     AND timestamp >= %s
                    ORDER BY timestamp ASC""",
-                (character_id, hours)
+                (character_id, since_time)
             )
             return cur.fetchall()
 
