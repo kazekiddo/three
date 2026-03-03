@@ -469,6 +469,63 @@ class ChatAI:
         
         return response_text, image_path
 
+    def send_proactive_message(self, trigger_hint: str):
+        """AI 主动发起一条消息（非用户触发）。
+        trigger_hint 描述当前情境背景（沉默时长等），注入给 AI 作为发消息的出发点。
+        只落库 model 侧消息，不写假用户消息。
+        """
+        now_dt = datetime.datetime.now()
+        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        weekday_str = weekdays[now_dt.weekday()]
+        current_time_str = now_dt.strftime(f"%Y年%m月%d日 {weekday_str} %H:%M")
+
+        # 触发提示：以特殊标记开头，便于事后从 chat history 中识别并移除
+        trigger_msg = (
+            f"[SYS_PROACTIVE] 现在是 {current_time_str}，{trigger_hint}"
+            "请你以角色身份，自然地主动给思远发一条消息。"
+            "内容简短自然，符合你的性格，不要提及这是系统触发或你在'自言自语'。"
+            "直接输出你想说的话即可。"
+        )
+
+        self.pending_output_image = None
+
+        response = self.chat.send_message([trigger_msg])
+
+        response_text = ""
+        if response.candidates and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if part.text and not part.text.strip().startswith("THOUGHT"):
+                    response_text += part.text
+
+        # 从 chat history 中移除注入的假"用户"触发消息，保持历史干净
+        try:
+            history = self.chat._curated_history
+            for i in range(len(history) - 1, -1, -1):
+                if history[i].role == 'user':
+                    is_proactive = any(
+                        hasattr(p, 'text') and p.text and '[SYS_PROACTIVE]' in p.text
+                        for p in history[i].parts
+                    )
+                    if is_proactive:
+                        del history[i]
+                    break
+        except Exception:
+            pass
+
+        image_path = self.pending_output_image
+
+        # 只落库 model 侧消息
+        if self.character_id and (response_text.strip() or image_path):
+            self.db.save_message(
+                self.character_id, 'model', response_text,
+                model=self.model,
+                media_path=image_path,
+                media_type='image/jpeg' if image_path else None
+            )
+            self.last_message_timestamp = datetime.datetime.now()
+
+        return response_text, image_path
+
 # 全局变量存储每个用户的聊天实例
 user_chats = {}
 ALLOWED_USER_ID = 569020802
@@ -704,6 +761,166 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode='HTML')
 
+
+def evaluate_proactive_intent(chat_ai, silence_seconds: float):
+    """独立调用 Gemini 评估 AI 此刻是否想主动联系用户。
+    使用独立 client + 无状态调用，不污染主 chat history。
+    返回 (should_send: bool, trigger_hint: str)
+    """
+    now_dt = datetime.datetime.now()
+    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    weekday_str = weekdays[now_dt.weekday()]
+    current_time_str = now_dt.strftime(f"%Y年%m月%d日 {weekday_str} %H:%M")
+
+    silence_hours = silence_seconds / 3600
+    if silence_hours < 1:
+        silence_desc = f"你们 {int(silence_seconds / 60)} 分钟前刚聊过"
+    elif silence_hours < 4:
+        silence_desc = f"已经有 {silence_hours:.1f} 小时没联系了"
+    elif silence_hours < 12:
+        silence_desc = f"今天还没怎么说话，已经 {silence_hours:.1f} 小时了"
+    elif silence_hours < 24:
+        silence_desc = f"今天几乎没有对话，沉默了 {silence_hours:.1f} 小时"
+    else:
+        silence_desc = f"已经超过一天（{silence_hours:.0f} 小时）没有消息了"
+
+    # 抓取最近几条对话作为上下文，让 AI 有话题感
+    recent_context = ""
+    try:
+        recent_msgs = chat_ai.db.get_chat_history(chat_ai.character_id, limit=4)
+        if recent_msgs:
+            recent_context = "\n最近的对话片段：\n"
+            for msg in recent_msgs:
+                role_name = "思远" if msg['role'] == 'user' else "你"
+                recent_context += f"  {role_name}: {msg['content'][:80]}\n"
+    except Exception:
+        pass
+
+    prompt = (
+        f"现在是 {current_time_str}。\n"
+        f"{silence_desc}。{recent_context}\n"
+        f"请思考：此刻你是否想主动给思远发一条消息？\n"
+        f"考虑因素：当前时间是否合适、是否有话想说、不要打扰对方太频繁。\n"
+        f"只回答 YES 或 NO，不要输出任何其他内容。"
+    )
+
+    try:
+        api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')
+        client = genai.Client(api_key=api_key)
+        config = types.GenerateContentConfig(
+            system_instruction=chat_ai.system_instruction,
+            temperature=1.2  # 略高温度，让决策更有随机性（有时想发有时不想）
+        )
+        response = client.models.generate_content(
+            model=chat_ai.model,
+            contents=prompt,
+            config=config
+        )
+        answer = response.text.strip().upper()
+        should_send = answer.startswith("YES")
+        return should_send, silence_desc + "。"
+    except Exception as e:
+        logger.error(f"意愿评估失败: {e}")
+        return False, ""
+
+
+def _schedule_next_proactive_check(context):
+    """安排下一次主动意愿检查，间隔随机 600~1500 秒（10~25 分钟），保证无规律感。"""
+    import random
+    next_interval = random.randint(600, 1500)
+    context.application.job_queue.run_once(proactive_check_job, when=next_interval)
+
+
+async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
+    """AI 自主意愿检查：evaluate → generate → send，完成后动态安排下一次检查。
+    - 夜间（北京时间 0:00~7:00）静默，不发消息
+    - 沉默不足 30 分钟不打扰
+    - AI 自己决定要不要发，内容也是 AI 自己生成
+    - 打字延迟模拟与普通消息一致
+    """
+    import asyncio
+    try:
+        now_dt = datetime.datetime.now()
+
+        # 夜间屏蔽（凌晨 0~7 点不打扰）
+        if 0 <= now_dt.hour < 7:
+            _schedule_next_proactive_check(context)
+            return
+
+        for user_id, chat_ai in list(user_chats.items()):
+            try:
+                last_ts = chat_ai.last_message_timestamp
+                silence_seconds = (now_dt - last_ts).total_seconds() if last_ts else 86400
+
+                # 沉默不足 30 分钟，不考虑主动打扰
+                if silence_seconds < 1800:
+                    continue
+
+                # 意愿评估（同步调用，独立 client，不污染 chat history）
+                should_send, trigger_hint = evaluate_proactive_intent(chat_ai, silence_seconds)
+                if not should_send:
+                    continue
+
+                # AI 生成主动消息（同步调用）
+                response_text, image_path = chat_ai.send_proactive_message(trigger_hint)
+
+                if not response_text.strip() and not image_path:
+                    continue
+
+                # 发送图片（如有）
+                if image_path and os.path.exists(image_path):
+                    await context.bot.send_photo(chat_id=user_id, photo=open(image_path, 'rb'))
+
+                # 分段发送文字，模拟真实打字速度（120 字/分钟），与 handle_message 保持一致
+                if response_text.strip():
+                    lines = response_text.split('\n')
+                    char_delay = 60.0 / 120.0
+                    for line in lines:
+                        if line.strip():
+                            delay = len(line.strip()) * char_delay
+
+                            async def keep_typing(cid, dur):
+                                end_time = asyncio.get_event_loop().time() + dur
+                                while asyncio.get_event_loop().time() < end_time:
+                                    try:
+                                        await context.bot.send_chat_action(chat_id=cid, action="typing")
+                                        await asyncio.sleep(4)
+                                    except asyncio.CancelledError:
+                                        break
+
+                            typing_task = asyncio.create_task(keep_typing(user_id, delay))
+                            await asyncio.sleep(delay)
+                            typing_task.cancel()
+                            await context.bot.send_message(chat_id=user_id, text=line.strip())
+
+            except Exception as e:
+                logger.error(f"主动消息处理出错 (user={user_id}): {e}")
+
+    except Exception as e:
+        logger.error(f"proactive_check_job 整体出错: {e}")
+    finally:
+        # 无论本轮结果如何，动态安排下一次检查
+        _schedule_next_proactive_check(context)
+
+
+async def post_init(application: Application):
+    """Bot 启动后自动恢复默认的 ChatAI 实例，保证 proactive job 启动时有实例可用。"""
+    db = Database()
+    try:
+        characters = db.list_characters()
+        if characters and ALLOWED_USER_ID not in user_chats:
+            char = characters[0]  # 默认使用第一个角色
+            user_chats[ALLOWED_USER_ID] = ChatAI(
+                system_instruction=char['system_instruction'],
+                character_id=char['id']
+            )
+            logger.error(f"[post_init] 已自动恢复角色 '{char['name']}' 的聊天实例")
+    except Exception as e:
+        logger.error(f"[post_init] 自动恢复聊天实例失败: {e}")
+    finally:
+        db.close()
+
+
 def main():
     """启动机器人"""
     token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -720,6 +937,7 @@ def main():
         .read_timeout(30.0)
         .write_timeout(30.0)
         .pool_timeout(30.0)
+        .post_init(post_init)
         .build()
     )
     
@@ -766,6 +984,11 @@ def main():
     # 每天凌晨四点（北京时间 UTC+8）执行一次巩固。UTC 20:00 是北京时间 04:00
     consolidate_time = datetime.time(hour=20, minute=0, second=0, tzinfo=datetime.timezone.utc)
     job_queue.run_daily(memory_consolidate_job, time=consolidate_time)
+
+    # AI 主动发消息：首次检查在启动后随机 5~15 分钟触发
+    # 之后每轮由 proactive_check_job 自身动态安排下次，间隔随机 10~25 分钟，保证无规律感
+    import random
+    job_queue.run_once(proactive_check_job, when=random.randint(300, 900))
 
     # 启动机器人
     print("Telegram Bot 已启动，记忆漏斗任务已注册")
