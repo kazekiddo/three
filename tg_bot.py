@@ -526,6 +526,36 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(history_text)
 
+async def trigger_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /filter 命令，手动触发 filter_task"""
+    import asyncio
+    await update.message.reply_text("已触发过滤任务 (filter_task)，正在后台执行...")
+    async def run_task():
+        try:
+            from memory_worker import MemoryWorker
+            worker = MemoryWorker()
+            await worker.filter_task()
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="过滤任务 (filter_task) 执行完成！")
+        except Exception as e:
+            logger.error(f"手动触发过滤任务失败: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"过滤任务执行失败: {str(e)}")
+    asyncio.create_task(run_task())
+
+async def trigger_consolidate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /consolidate 命令，手动触发 consolidate_task"""
+    import asyncio
+    await update.message.reply_text("已触发巩固任务 (consolidate_task)，正在后台执行...")
+    async def run_task():
+        try:
+            from memory_worker import MemoryWorker
+            worker = MemoryWorker()
+            await worker.consolidate_task()
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="巩固任务 (consolidate_task) 执行完成！")
+        except Exception as e:
+            logger.error(f"手动触发巩固任务失败: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"巩固任务执行失败: {str(e)}")
+    asyncio.create_task(run_task())
+
 def main():
     """启动机器人"""
     token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -552,6 +582,8 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("select", select_character))
     application.add_handler(CommandHandler("history", history))
+    application.add_handler(CommandHandler("filter", trigger_filter))
+    application.add_handler(CommandHandler("consolidate", trigger_consolidate))
     # 更新过滤器，支持文字和图片（MESSAGE_TYPE.PHOTO）
     application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_message))
     
