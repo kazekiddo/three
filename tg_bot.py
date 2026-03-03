@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from dotenv import load_dotenv
 from telegram import Update
@@ -23,6 +24,100 @@ load_dotenv()
 # 确保媒体目录存在
 MEDIA_DIR = os.path.join(os.getcwd(), 'media', 'photos')
 os.makedirs(MEDIA_DIR, exist_ok=True)
+
+def _parse_time_range(message):
+    """从用户消息中解析时间范围关键词，返回 (time_start, time_end) 或 (None, None)"""
+    now = datetime.datetime.now()
+    
+    # X天前
+    m = re.search(r'(\d+)\s*天前', message)
+    if m:
+        days = int(m.group(1))
+        target = now - datetime.timedelta(days=days)
+        return target.replace(hour=0, minute=0, second=0, microsecond=0), target.replace(hour=23, minute=59, second=59, microsecond=0)
+    
+    # X周前
+    m = re.search(r'(\d+)\s*周前', message)
+    if m:
+        weeks = int(m.group(1))
+        target = now - datetime.timedelta(weeks=weeks)
+        start = target - datetime.timedelta(days=target.weekday())  # 那周一
+        end = start + datetime.timedelta(days=6)  # 那周日
+        return start.replace(hour=0, minute=0, second=0, microsecond=0), end.replace(hour=23, minute=59, second=59, microsecond=0)
+    
+    # X(个)月前
+    m = re.search(r'(\d+)\s*个?月前', message)
+    if m:
+        months = int(m.group(1))
+        year, month = now.year, now.month - months
+        while month <= 0:
+            month += 12
+            year -= 1
+        import calendar
+        last_day = calendar.monthrange(year, month)[1]
+        return datetime.datetime(year, month, 1), datetime.datetime(year, month, last_day, 23, 59, 59)
+    
+    # 大前天
+    if '大前天' in message:
+        d = now - datetime.timedelta(days=3)
+        return d.replace(hour=0, minute=0, second=0, microsecond=0), d.replace(hour=23, minute=59, second=59, microsecond=0)
+    
+    # 前天
+    if '前天' in message:
+        d = now - datetime.timedelta(days=2)
+        return d.replace(hour=0, minute=0, second=0, microsecond=0), d.replace(hour=23, minute=59, second=59, microsecond=0)
+    
+    # 昨天
+    if '昨天' in message:
+        d = now - datetime.timedelta(days=1)
+        return d.replace(hour=0, minute=0, second=0, microsecond=0), d.replace(hour=23, minute=59, second=59, microsecond=0)
+    
+    # 上(个)周/星期
+    if re.search(r'上\s*个?\s*(周|星期)', message):
+        days_since_monday = now.weekday()
+        last_monday = now - datetime.timedelta(days=days_since_monday + 7)
+        last_sunday = last_monday + datetime.timedelta(days=6)
+        return last_monday.replace(hour=0, minute=0, second=0, microsecond=0), last_sunday.replace(hour=23, minute=59, second=59, microsecond=0)
+    
+    # 上(个)月
+    if re.search(r'上\s*个?\s*月', message):
+        year, month = now.year, now.month - 1
+        if month <= 0:
+            month = 12
+            year -= 1
+        import calendar
+        last_day = calendar.monthrange(year, month)[1]
+        return datetime.datetime(year, month, 1), datetime.datetime(year, month, last_day, 23, 59, 59)
+    
+    # 去年
+    if '去年' in message:
+        y = now.year - 1
+        return datetime.datetime(y, 1, 1), datetime.datetime(y, 12, 31, 23, 59, 59)
+    
+    # 几天前（模糊，取2-7天范围）
+    if '几天前' in message:
+        return (now - datetime.timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0), (now - datetime.timedelta(days=2)).replace(hour=23, minute=59, second=59, microsecond=0)
+    
+    # 几周前（模糊，取1-4周范围）
+    if '几周前' in message:
+        return (now - datetime.timedelta(weeks=4)).replace(hour=0, minute=0, second=0, microsecond=0), (now - datetime.timedelta(weeks=1)).replace(hour=23, minute=59, second=59, microsecond=0)
+    
+    # 几个月前（模糊，取1-4个月范围）
+    if re.search(r'几个?月前', message):
+        year_s, month_s = now.year, now.month - 4
+        while month_s <= 0:
+            month_s += 12
+            year_s -= 1
+        year_e, month_e = now.year, now.month - 1
+        if month_e <= 0:
+            month_e += 12
+            year_e -= 1
+        import calendar
+        last_day_e = calendar.monthrange(year_e, month_e)[1]
+        return datetime.datetime(year_s, month_s, 1), datetime.datetime(year_e, month_e, last_day_e, 23, 59, 59)
+    
+    return None, None
+
 
 class ChatAI:
     def __init__(self, model="gemini-2.5-flash", api_key=None, system_instruction=None, character_id=None):
@@ -298,8 +393,14 @@ class ChatAI:
                         evidence = f" (依据: {fact['evidence_span']})" if fact.get('evidence_span') else ""
                         core_facts_text += f"{i+1}. {fact['fact_text']}{evidence}\n"
                 
+                # 解析用户消息中的时间意图
+                time_start, time_end = _parse_time_range(message)
+                
                 # 调取最相关的5条情景记忆（具体事件、时间线）
-                episodic_memories = self.db.search_episodic_memories(self.character_id, embedding, limit=5)
+                episodic_memories = self.db.search_episodic_memories(
+                    self.character_id, embedding, limit=5,
+                    time_start=time_start, time_end=time_end
+                )
                 if episodic_memories:
                     episodic_text = "\n\n[系统附加情景回忆：过去发生的相关事件（供参考，可自然地融入回答）]\n"
                     for i, mem in enumerate(episodic_memories):

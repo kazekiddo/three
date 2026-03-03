@@ -166,23 +166,37 @@ class Database:
             conn.rollback()
             raise e
 
-    def search_episodic_memories(self, character_id, query_embedding, limit=5):
-        """向量检索最相关的情景记忆，按相似度×时间衰减排序"""
+    def search_episodic_memories(self, character_id, query_embedding, limit=5, time_start=None, time_end=None):
+        """向量检索最相关的情景记忆，支持时间范围过滤"""
         conn = self.connect()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # 综合排序：余弦相似度 × 时间衰减因子（半衰期30天）
-                # 越近期的记忆权重越高，但语义相关性仍是主导因素
-                cur.execute(
-                    """SELECT id, content, emotion_intensity, event_time, created_at,
-                              1 - (embedding <=> %s::vector) AS similarity
-                       FROM episodic_memories 
-                       WHERE character_id = %s 
-                         AND embedding IS NOT NULL
-                       ORDER BY (1 - (embedding <=> %s::vector)) * EXP(-0.023 * EXTRACT(EPOCH FROM (NOW() - COALESCE(event_time, created_at))) / 86400) DESC
-                       LIMIT %s""",
-                    (np.array(query_embedding), character_id, np.array(query_embedding), limit)
-                )
+                if time_start and time_end:
+                    # 指定时间范围：按纯相似度排序，不使用时间衰减
+                    cur.execute(
+                        """SELECT id, content, emotion_intensity, event_time, created_at,
+                                  1 - (embedding <=> %s::vector) AS similarity
+                           FROM episodic_memories 
+                           WHERE character_id = %s 
+                             AND embedding IS NOT NULL
+                             AND event_time IS NOT NULL
+                             AND event_time BETWEEN %s AND %s
+                           ORDER BY embedding <=> %s::vector
+                           LIMIT %s""",
+                        (np.array(query_embedding), character_id, time_start, time_end, np.array(query_embedding), limit)
+                    )
+                else:
+                    # 默认：余弦相似度 × 时间衰减因子（半衰期30天）
+                    cur.execute(
+                        """SELECT id, content, emotion_intensity, event_time, created_at,
+                                  1 - (embedding <=> %s::vector) AS similarity
+                           FROM episodic_memories 
+                           WHERE character_id = %s 
+                             AND embedding IS NOT NULL
+                           ORDER BY (1 - (embedding <=> %s::vector)) * EXP(-0.023 * EXTRACT(EPOCH FROM (NOW() - COALESCE(event_time, created_at))) / 86400) DESC
+                           LIMIT %s""",
+                        (np.array(query_embedding), character_id, np.array(query_embedding), limit)
+                    )
                 return cur.fetchall()
         except Exception as e:
             conn.rollback()
