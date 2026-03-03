@@ -36,4 +36,5 @@ jobs:
             cd /data/three
             pip3 install -r requirements.txt
             sudo systemctl restart three-tg-bot
+            sudo systemctl restart three-tg-helper-bot
             echo "Bot deployed and restarted successfully"
