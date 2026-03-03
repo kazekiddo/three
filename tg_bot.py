@@ -556,6 +556,19 @@ async def trigger_consolidate(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"巩固任务执行失败: {str(e)}")
     asyncio.create_task(run_task())
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /help 命令，显示所有可用命令"""
+    help_text = (
+        "🤖 *可用命令列表*\n\n"
+        "/start - 显示所有可用角色列表\n"
+        "/select \\<角色ID\\> - 选择一个角色开始聊天\n"
+        "/history - 查看与当前角色的最近 10 条历史记录\n"
+        "/filter - 手动触发抽取情景记忆任务 (后台运行)\n"
+        "/consolidate - 手动触发巩固核心人格任务 (后台运行)\n"
+        "/help - 显示此帮助信息"
+    )
+    await update.message.reply_text(help_text, parse_mode='MarkdownV2')
+
 def main():
     """启动机器人"""
     token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -584,6 +597,7 @@ def main():
     application.add_handler(CommandHandler("history", history))
     application.add_handler(CommandHandler("filter", trigger_filter))
     application.add_handler(CommandHandler("consolidate", trigger_consolidate))
+    application.add_handler(CommandHandler("help", help_command))
     # 更新过滤器，支持文字和图片（MESSAGE_TYPE.PHOTO）
     application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_message))
     
