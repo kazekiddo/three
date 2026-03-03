@@ -452,6 +452,8 @@ class ChatAI:
             for part in response.candidates[0].content.parts:
                 if part.text and not part.text.strip().startswith("THOUGHT"):
                     response_text += part.text
+        # 清理模型生成图片时附带的内部标记文本
+        response_text = response_text.replace("Here is the original image:", "").strip()
         
         # 从 chat history 中清除记忆块，避免 token 累积
         # 记忆只在当前轮对模型可见，发送后即清除
