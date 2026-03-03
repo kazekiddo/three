@@ -42,22 +42,22 @@ class HelperAI:
             img = Image.open(CHARACTER_PHOTO_PATH)
             history.append({
                 'role': 'user',
-                'parts': ["This is the character (Nanase) reference.", img]
+                'parts': [{'text': "This is the character (Nanase) reference."}, img]
             })
             history.append({
                 'role': 'model',
-                'parts': ["I have received Nanase's reference. I will maintain consistency."]
+                'parts': [{'text': "I have received Nanase's reference. I will maintain consistency."}]
             })
             
         if mode in ['gen_user', 'gen_both'] and os.path.exists(USER_PHOTO_PATH):
             img = Image.open(USER_PHOTO_PATH)
             history.append({
                 'role': 'user',
-                'parts': ["This is the user (Siyuan) reference.", img]
+                'parts': [{'text': "This is the user (Siyuan) reference."}, img]
             })
             history.append({
                 'role': 'model',
-                'parts': ["I have received Siyuan's reference. I will maintain consistency."]
+                'parts': [{'text': "I have received Siyuan's reference. I will maintain consistency."}]
             })
 
         self.chat = self.client.chats.create(
@@ -74,7 +74,8 @@ class HelperAI:
         # 强制要求日系卡通风格
         full_prompt = f"{prompt}. STYLE REQUIREMENT: Strictly follow Japanese anime / cartoon style."
         
-        response = self.chat.send_message(full_prompt)
+        # 统一使用显式格式发送消息，增强兼容性
+        response = self.chat.send_message([{'text': full_prompt}])
         
         for part in response.parts:
             if part.inline_data is not None:

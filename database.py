@@ -67,13 +67,17 @@ class Database:
     def save_message(self, character_id, role, content, model=None, context_prefix=None, media_path=None, media_type=None):
         """保存聊天消息"""
         conn = self.connect()
-        with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO chat_messages (character_id, role, content, context_prefix, model, media_path, media_type, timestamp) 
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                (character_id, role, content, context_prefix, model, media_path, media_type, datetime.now())
-            )
-            conn.commit()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO chat_messages (character_id, role, content, context_prefix, model, media_path, media_type, timestamp) 
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (character_id, role, content, context_prefix, model, media_path, media_type, datetime.now())
+                )
+                conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
     
     def get_chat_history(self, character_id, limit=50):
         """获取聊天历史"""
@@ -205,33 +209,41 @@ class Database:
     def save_core_fact_memory(self, character_id, fact_text, embedding, category, stability_score, evidence_span):
         """保存核心人格特征"""
         conn = self.connect()
-        with conn.cursor() as cur:
-            # pgvector 支持 numpy arrays 或者 lists 作为输入
-            cur.execute(
-                """INSERT INTO core_fact_memories 
-                   (character_id, fact_text, embedding, category, stability_score, evidence_span)
-                   VALUES (%s, %s, %s, %s, %s, %s)""",
-                (character_id, fact_text, np.array(embedding), category, stability_score, evidence_span)
-            )
-            conn.commit()
+        try:
+            with conn.cursor() as cur:
+                # pgvector 支持 numpy arrays 或者 lists 作为输入
+                cur.execute(
+                    """INSERT INTO core_fact_memories 
+                       (character_id, fact_text, embedding, category, stability_score, evidence_span)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (character_id, fact_text, np.array(embedding), category, stability_score, evidence_span)
+                )
+                conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
 
     def search_core_fact_memories(self, character_id, query_embedding, limit=3):
         """向量检索最相关的性格核心特征（未归档且相关度高）"""
         conn = self.connect()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 用余弦距离，<-> 是 Euclidean, <=> 是余弦距离, <#> 是内积
-            # 搜索相似度高的事实，并要求未归档且 validation_score > 0.3
-            cur.execute(
-                """SELECT id, fact_text, evidence_span, validation_score, stability_score, 1 - (embedding <=> %s::vector) AS similarity 
-                   FROM core_fact_memories 
-                   WHERE character_id = %s 
-                     AND is_archived = false
-                     AND validation_score > 0.3
-                   ORDER BY embedding <=> %s::vector 
-                   LIMIT %s""",
-                (np.array(query_embedding), character_id, np.array(query_embedding), limit)
-            )
-            return cur.fetchall()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # 用余弦距离，<-> 是 Euclidean, <=> 是余弦距离, <#> 是内积
+                # 搜索相似度高的事实，并要求未归档且 validation_score > 0.3
+                cur.execute(
+                    """SELECT id, fact_text, evidence_span, validation_score, stability_score, 1 - (embedding <=> %s::vector) AS similarity 
+                       FROM core_fact_memories 
+                       WHERE character_id = %s 
+                         AND is_archived = false
+                         AND validation_score > 0.3
+                       ORDER BY embedding <=> %s::vector 
+                       LIMIT %s""",
+                    (np.array(query_embedding), character_id, np.array(query_embedding), limit)
+                )
+                return cur.fetchall()
+        except Exception as e:
+            conn.rollback()
+            raise e
 
     def get_similar_core_fact(self, character_id, embedding, threshold=0.85):
         """查找是否有非常相似的已有核心特征，返回 id"""
