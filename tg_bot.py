@@ -327,9 +327,13 @@ class ChatAI:
         if image_data:
             message_parts.append(types.Part.from_bytes(data=image_data, mime_type=image_mime_type))
 
-        # 获取AI回复
+        # 获取AI回复，过滤掉模型的思考过程（THOUGHT part）
         response = self.chat.send_message(message_parts)
-        response_text = response.text if response.text else ""
+        response_text = ""
+        if response.candidates and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if part.text and not part.text.strip().startswith("THOUGHT"):
+                    response_text += part.text
         
         # 提取生成图片的路径（如果有的话）
         image_path = self.pending_output_image
