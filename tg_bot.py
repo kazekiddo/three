@@ -472,8 +472,9 @@ class ChatAI:
         
         # 保存AI回复（只有非空时才保存）
         if self.character_id and (response_text.strip() or image_path):
+            save_text = response_text if response_text.strip() else "[AI发送了一张图片]"
             self.db.save_message(
-                self.character_id, 'model', response_text, 
+                self.character_id, 'model', save_text, 
                 model=self.model,
                 media_path=image_path,
                 media_type='image/jpeg' if image_path else None
