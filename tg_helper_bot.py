@@ -143,6 +143,21 @@ async def end_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("没有正在运行的生图会话。")
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_auth(update): return
+    help_text = (
+        "🤖 <b>Helper Bot 命令列表</b>\n\n"
+        "/gen — 启动自由生图模式（无参考角色）\n"
+        "/gen_me — 启动生图模式（参考 Nanase）\n"
+        "/gen_user — 启动生图模式（参考 Siyuan）\n"
+        "/gen_both — 启动生图模式（同时参考 Nanase 和 Siyuan）\n"
+        "/end — 结束当前生图会话\n"
+        "/help — 显示此帮助信息\n\n"
+        "💡 启动任意生图模式后，直接发送文字描述即可生成图片，"
+        "可持续对话修改，完成后使用 /end 结束。"
+    )
+    await update.message.reply_text(help_text, parse_mode='HTML')
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update): return
     user_id = update.effective_user.id
@@ -183,6 +198,7 @@ def main():
     application.add_handler(CommandHandler("gen_user", start_gen))
     application.add_handler(CommandHandler("gen_both", start_gen))
     application.add_handler(CommandHandler("end", end_gen))
+    application.add_handler(CommandHandler("help", help_command))
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
