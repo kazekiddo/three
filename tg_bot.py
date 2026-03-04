@@ -120,7 +120,7 @@ def _parse_time_range(message):
 
 
 class ChatAI:
-    def __init__(self, model="gemini-2.5-flash", api_key=None, system_instruction=None, character_id=None):
+    def __init__(self, model="gemini-3.1-flash-lite-preview", api_key=None, system_instruction=None, character_id=None):
         """初始化聊天AI"""
         if api_key is None:
             api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')
@@ -450,7 +450,7 @@ class ChatAI:
         response_text = ""
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
-                if part.text and not part.text.strip().startswith("THOUGHT"):
+                if part.text and not part.text.strip().startswith(("THOUGHT", "THINK")):
                     response_text += part.text
         # 清理模型生成图片时附带的内部标记文本
         response_text = response_text.replace("Here is the original image:", "").strip()
@@ -509,7 +509,7 @@ class ChatAI:
         response_text = ""
         if response.candidates and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
-                if part.text and not part.text.strip().startswith("THOUGHT"):
+                if part.text and not part.text.strip().startswith(("THOUGHT", "THINK")):
                     response_text += part.text
 
         # 从 chat history 中移除注入的假"用户"触发消息，保持历史干净
@@ -874,9 +874,8 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         now_dt = datetime.datetime.now()
 
-        # 夜间屏蔽（凌晨 0~7 点不打扰）
+        # 夜间屏蔽（凌晨 0~7 点不打扰，直接跳过，finally 会安排下次）
         if 0 <= now_dt.hour < 7:
-            _schedule_next_proactive_check(context)
             return
 
         for user_id, chat_ai in list(user_chats.items()):
@@ -1022,10 +1021,10 @@ def main():
     consolidate_time = datetime.time(hour=20, minute=0, second=0, tzinfo=datetime.timezone.utc)
     job_queue.run_daily(memory_consolidate_job, time=consolidate_time)
 
-    # AI 主动发消息：首次检查在启动后随机 5~15 分钟触发
-    # 之后每轮由 proactive_check_job 自身动态安排下次，间隔随机 10~25 分钟，保证无规律感
+    # AI 主动发消息：首次检查在启动后随机 10~25 分钟触发
+    # 之后每轮由 proactive_check_job 自身动态安排下次，间隔同样随机 10~25 分钟，保证无规律感
     import random
-    job_queue.run_once(proactive_check_job, when=random.randint(300, 900))
+    job_queue.run_once(proactive_check_job, when=random.randint(600, 1500))
 
     # 启动机器人
     print("Telegram Bot 已启动，记忆漏斗任务已注册")
