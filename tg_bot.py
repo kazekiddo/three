@@ -120,7 +120,7 @@ def _parse_time_range(message):
 
 
 class ChatAI:
-    def __init__(self, model="gemini-2.5-flash, api_key=None, system_instruction=None, character_id=None):
+    def __init__(self, model="gemini-2.5-flash", api_key=None, system_instruction=None, character_id=None):
         """初始化聊天AI"""
         if api_key is None:
             api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')

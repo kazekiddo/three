@@ -157,7 +157,7 @@ class MemoryWorker:
 
                 try:
                     response = self.client.models.generate_content(
-                        model='gemini-2.5-flashh',
+                        model='gemini-2.5-flash',
                         contents=prompt,
                         config={'response_mime_type': 'application/json'}
                     )
