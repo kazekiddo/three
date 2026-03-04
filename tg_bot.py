@@ -277,7 +277,8 @@ class ChatAI:
                 )
                 
                 saved_path = None
-                for part in response.parts:
+                parts_list = response.parts if response.parts else []
+                for part in parts_list:
                     if part.inline_data is not None:
                         # 确定保存路径，使用 .jpg 格式
                         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -448,7 +449,7 @@ class ChatAI:
         # 获取AI回复（automatic_function_calling 在 send_message 内部自动完成，response 是最终响应）
         response = self.chat.send_message(message_parts)
         response_text = ""
-        if response.candidates and response.candidates[0].content.parts:
+        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if part.text and not part.text.strip().startswith(("THOUGHT", "THINK")):
                     response_text += part.text
