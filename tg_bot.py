@@ -453,7 +453,12 @@ class ChatAI:
                 if part.text and not part.text.strip().startswith(("THOUGHT", "THINK")):
                     response_text += part.text
         # 清理模型生成图片时附带的内部标记文本
-        response_text = response_text.replace("Here is the original image:", "").strip()
+        response_text = response_text.replace("Here is the original image:", "")
+        # 清理 AI 可能模仿输出的系统标记（它从 chat history 里学到的）
+        response_text = re.sub(r'\[\u7cfb\u7edf\u65f6\u95f4\u611f\u77e5[^\]]*\]', '', response_text)
+        response_text = re.sub(r'\[SYS_PROACTIVE[^\]]*\]', '', response_text)
+        response_text = re.sub(r'\[\u7cfb\u7edf\u9644\u52a0[^\]]*\]', '', response_text)
+        response_text = response_text.strip()
         
         # 从 chat history 中清除记忆块，避免 token 累积
         # 记忆只在当前轮对模型可见，发送后即清除
@@ -511,6 +516,12 @@ class ChatAI:
             for part in response.candidates[0].content.parts:
                 if part.text and not part.text.strip().startswith(("THOUGHT", "THINK")):
                     response_text += part.text
+
+        # 清理 AI 可能模仿输出的系统标记
+        response_text = re.sub(r'\[\u7cfb\u7edf\u65f6\u95f4\u611f\u77e5[^\]]*\]', '', response_text)
+        response_text = re.sub(r'\[SYS_PROACTIVE[^\]]*\]', '', response_text)
+        response_text = re.sub(r'\[\u7cfb\u7edf\u9644\u52a0[^\]]*\]', '', response_text)
+        response_text = response_text.strip()
 
         # 从 chat history 中移除注入的假"用户"触发消息，保持历史干净
         try:
