@@ -65,7 +65,7 @@ class MemoryWorker:
                 try:
                     # 使用 structured output 提取
                     response = self.client.models.generate_content(
-                        model='gemini-3.1-flash-lite-preview',
+                        model='gemini-2.5-flash',
                         contents=prompt,
                         config={
                             'response_mime_type': 'application/json'
@@ -157,7 +157,7 @@ class MemoryWorker:
 
                 try:
                     response = self.client.models.generate_content(
-                        model='gemini-3.1-flash-lite-previewh',
+                        model='gemini-2.5-flashh',
                         contents=prompt,
                         config={'response_mime_type': 'application/json'}
                     )
