@@ -386,6 +386,7 @@ class Database:
 
         # --- 6. 持久化 ---
         with conn.cursor() as cur:
+            # 6.1 更新当前最新状态
             cur.execute(
                 """UPDATE relationship_states 
                    SET closeness=%s, trust=%s, resentment=%s, dependency=%s, attraction=%s, 
@@ -397,6 +398,19 @@ class Database:
                  new_vals['security'], new_vals['jealousy'], new_momentum, new_stage, 
                  new_narrative, character_id)
             )
+
+            # 6.2 转存历史快照
+            cur.execute(
+                """INSERT INTO relationship_history 
+                   (character_id, closeness, trust, resentment, dependency, attraction, 
+                    respect, security, jealousy, momentum, stage, narrative)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (character_id, new_vals['closeness'], new_vals['trust'], new_vals['resentment'],
+                 new_vals['dependency'], new_vals['attraction'], new_vals['respect'],
+                 new_vals['security'], new_vals['jealousy'], new_momentum, new_stage,
+                 new_narrative)
+            )
+            
             conn.commit()
 
     def get_relationship_description(self, character_id):
