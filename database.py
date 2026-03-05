@@ -301,13 +301,17 @@ class Database:
         new_vals = {}
         for k in total_deltas.keys():
             v, d = float(state[k] or 0.0), total_deltas[k]
-            # 基础衰减
+            # 基础衰减逻辑：怨念会自然消散
             if k == 'resentment': v *= decay_factor
+            
+            # 单次事件影响幅度限制 (稳定性锚点)
+            if k == 'resentment': d = min(d, 0.08) # 怨念单次增长不超 0.08
+            if k == 'trust': d = max(d, -0.1)     # 信任单次跌幅不超 0.1
             
             if d > 0:
                 v = v + d * (1.0 - v)
             elif d < 0:
-                v = v + d * v
+                v = v + d * v # 乘法跌落，越靠近 0 跌得越慢
             
             new_vals[k] = max(0.0, min(1.0, v))
 
@@ -315,32 +319,37 @@ class Database:
         if shock_events:
             for s in shock_events:
                 if s == 'betrayal':
-                    new_vals['trust'] *= 0.5
-                    new_vals['respect'] *= 0.7
-                    new_vals['resentment'] = min(1.0, new_vals['resentment'] + 0.3)
+                    new_vals['trust'] *= 0.7  # 由 0.5 调整为 0.7，更温和
+                    new_vals['respect'] *= 0.8
+                    new_vals['resentment'] = min(0.85, new_vals['resentment'] + 0.2)
                 elif s == 'confession':
                     new_vals['attraction'] = min(1.0, new_vals['attraction'] + 0.2)
                     new_vals['closeness'] = min(1.0, new_vals['closeness'] + 0.1)
 
         # --- 5. 一致性校验与阶段演进 (Sanity Check & Evolution) ---
         def _apply_sanity_check(v, s_name):
-            # 逻辑1：安全感与嫉妒心的关联
+            # 逻辑1：怨念封顶，防止永久性死局
+            v['resentment'] = min(v['resentment'], 0.85)
+            # 信任软保底
+            v['trust'] = max(v['trust'], 0.1)
+            
+            # 逻辑2：依恋逻辑重组 (关联亲密、信任和安全)
+            # 依赖度应随着信任和安全感的崩塌而受限，防止产生病态的、逻辑不自洽的依恋
+            target_dep = 0.4 * v['closeness'] + 0.3 * v['trust'] + 0.3 * v['security']
+            # 当前依赖度向目标依赖度缓慢靠拢 (惯性)
+            v['dependency'] = 0.7 * v['dependency'] + 0.3 * target_dep
+            
+            # 逻辑3：安全感与嫉妒心的关联
             if v['security'] < 0.4:
                 v['jealousy'] = max(v['jealousy'], 0.15)
-            # 逻辑2：当亲密度很高时，依恋度不应极低
-            if v['closeness'] > 0.5:
-                v['dependency'] = max(v['dependency'], 0.3)
-            # 逻辑3：怨念控速——如果怨念极高，任何正向动量都会被抵消，且很难升温
+            
+            # 逻辑4：怨念控速——如果怨念极高，任何正向动量都会被抵消
             if v['resentment'] > 0.5:
                 nonlocal new_momentum
                 new_momentum = min(new_momentum, 0.0)
-            # 逻辑4：信任修正——防止 trust 为 0 时还在写甜蜜叙事（这种一致性在 narrative 生成端已加强，代码端保底）
-            if v['trust'] < 0.2 and v['closeness'] > 0.6:
-                v['trust'] = 0.25 # 强制维持最低限度的纽带，除非发生 breakup
             
             # --- 阶段自动映射状态机 ---
             c, t, a, r = v['closeness'], v['trust'], v['attraction'], v['respect']
-            sec = v['security']
             
             if c >= 0.8 and a >= 0.8 and t >= 0.7:
                 new_s = 'partner'
@@ -350,7 +359,7 @@ class Database:
                 new_s = 'close_friend'
             elif c >= 0.45 and t >= 0.25:
                 new_s = 'friend'
-            elif c >= 0.2:
+            elif c >= 0.2 or t >= 0.1:
                 new_s = 'acquaintance'
             else:
                 new_s = 'stranger'
@@ -360,9 +369,12 @@ class Database:
             curr_idx = stages.index(s_name) if s_name in stages else 0
             new_idx = stages.index(new_s)
             
-            # 锁死逻辑：如果信任度和亲密度没跌破当前阶段地板，不轻易降级
+            # 锁死逻辑：只有当亲密度跌破当前级别 20% 时才允许降级，否则升级不受阻碍
             if new_idx < curr_idx:
-                if (curr_idx == 2 and c > 0.35) or (curr_idx >= 4 and c > 0.5):
+                # 只有亲密度真的不行了才降级
+                thresholds = {'friend': 0.35, 'close_friend': 0.45, 'romantic': 0.55, 'partner': 0.7}
+                floor = thresholds.get(s_name, 0.0)
+                if c > floor:
                     new_s = s_name
 
             return v, new_s
