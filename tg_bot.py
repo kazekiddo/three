@@ -336,6 +336,15 @@ class ChatAI:
         # 创建聊天
         config = {'automatic_function_calling': {}}
         if system_instruction:
+            # 追加图片工具使用约束，防止模型试图直接输出图片
+            image_constraint = (
+                "\n\n【重要工具使用规则】"
+                "你不能直接输出或嵌入图片。你没有原生图片输出能力。"
+                "当用户请求图片、自拍、照片时，你必须调用 generate_image 工具函数来生成图片。"
+                "绝对不要在回复中写 'Here is the original image' 或类似的占位文字。"
+                "调用工具后，系统会自动将图片发送给用户。"
+            )
+            
             reminder_constraint = (
                 "\n\n【提醒与记性规则】"
                 "你拥有‘记事’能力。如果你在对话中最终答应了要在未来某个时间提醒思远某事，"
