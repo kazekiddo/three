@@ -51,19 +51,31 @@ class MemoryWorker:
                 recent_events = self.db.get_recent_episodic_ids(cid, limit=5)
                 recent_events_text = "\n".join([f"ID: {e['id']} | 内容: {e['content']}" for e in recent_events])
 
+                # 获取所有维度状态感知
+                curr_state = self.db.get_relationship_state(cid)
+                state_text = "未知"
+                if curr_state:
+                    state_text = (
+                        f"阶段: {curr_state.get('stage')} | 依恋类型: {curr_state.get('attachment_style')}\n"
+                        f"亲密: {curr_state.get('closeness', 0):.2f}, 信任: {curr_state.get('trust', 0):.2f}, 吸引: {curr_state.get('attraction', 0):.2f}, "
+                        f"依赖: {curr_state.get('dependency', 0):.2f}, 尊重: {curr_state.get('respect', 0):.2f}, 怨念: {curr_state.get('resentment', 0):.2f}, "
+                        f"安全: {curr_state.get('security', 0):.2f}, 嫉妒: {curr_state.get('jealousy', 0):.2f}"
+                    )
+
                 prompt = (
-                    "分析以下对话，提取情景事件、重要关系事件及动态叙事。\n"
-                    "要求：\n"
-                    "1. **长期情景提取**：\n"
-                    "   - 必须保留事件的时间信息。对话中的 [系统时间感知] 标签包含了精确时间，请据此推断每个事件发生的时间。\n"
-                    "   - content 中必须包含时间上下文，例如'2026年3月2日晚上，用户去了游乐场玩'。\n"
-                    "2. **关系事件识别 (关键)**：识别对话中影响关系的具体事件值。\n"
+                    "你是一位顶级心理博弈与情感专家。请根据【当前心理基准】和【最新对话内容】，为角色生成深度反思报告。\n"
+                    f"【当前心理基准分值】\n{state_text}\n\n"
+                    "任务要求：\n"
+                    "1. **长期情景记忆 (Memories)**：\n"
+                    "   - 必须通过消息中的 [系统时间感知] 标签推断事件的具体发生日期时间。\n"
+                    "   - content 必须包含时间上下文，例如'2026年3月2日晚上，用户没有履行承诺...'。\n"
+                    "2. **关系维度演进 (Relational Events)**：\n"
                     "   - **targets**: 必须从 [closeness, trust, attraction, dependency, respect, resentment, security, jealousy] 中选择。\n"
                     "   - **intensities**: 必须从 [strong_positive, positive, neutral, negative, strong_negative] 中选择。\n"
-                    "3. **冲击性事件 (Shock Events)**：是否发生了重大转折？只需返回关键字列表：\n"
-                    "   - `betrayal` (背叛/欺骗), `confession` (表白), `breakup` (分手), `reconciliation` (和解)\n"
-                    "4. **关系叙事 (Narrative)**：用一两句感性的话总结当前关系现状（例如：'你们的关系正在升温，但昨天的隐瞒让你感到一丝不安'）。\n"
-                    "5. **短期情绪**：提取心情数值 mood, anger, affection, jealousy, sadness (0-1)。\n\n"
+                    "   - **逻辑补差**：若当前信任极低且怨念极高，正向激励需大打折扣或不计入。\n"
+                    "3. **冲击性事件 (Shock Events)**：识别重大转折，返回关键字列表（如：betrayal, confession, breakup, reconciliation）。\n"
+                    "4. **关系叙事总结 (Narrative)**：必须严格符合分值。禁止在怨念高、信任崩塌时使用'关系甜蜜、依恋'。请用感性但逻辑自洽的语气总结你们现在的心理距离和博弈现状。\n"
+                    "5. **短期情绪提取**：提供 mood, anger, affection, jealousy, sadness 的实时分值 (0-1)。\n\n"
                     f"【最近事件参考】\n{recent_events_text}\n\n"
                     f"对话记录：\n{conversation}\n\n"
                     "请以JSON格式返回：\n"
@@ -71,8 +83,8 @@ class MemoryWorker:
                     "  \"memories\": [{ \"content\": \"...\", \"event_time\": \"...\", \"emotion_intensity\": 1-10, \"emotion_category\": \"...\" }],\n"
                     "  \"relational_events\": [{ \"target\": \"trust\", \"intensity\": \"negative\" }],\n"
                     "  \"shock_events\": [\"betrayal\"],\n"
-                    "  \"relationship_narrative\": \"目前的关系总结...\",\n"
-                    "  \"short_term_mood\": { \"mood\": 0.6, \"anger\": 0.1 }\n"
+                    "  \"relationship_narrative\": \"深刻的叙事总结...\",\n"
+                    "  \"short_term_mood\": { \"mood\": 0.6, \"anger\": 0.1, \"affection\": 0.2, \"jealousy\": 0.1, \"sadness\": 0.4 }\n"
                     "}"
                 )
 

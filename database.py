@@ -330,9 +330,13 @@ class Database:
             # 逻辑2：当亲密度很高时，依恋度不应极低
             if v['closeness'] > 0.5:
                 v['dependency'] = max(v['dependency'], 0.3)
-            # 逻辑3：怨念极高时，信任度会自动受挫
-            if v['resentment'] > 0.6:
-                v['trust'] *= 0.8
+            # 逻辑3：怨念控速——如果怨念极高，任何正向动量都会被抵消，且很难升温
+            if v['resentment'] > 0.5:
+                nonlocal new_momentum
+                new_momentum = min(new_momentum, 0.0)
+            # 逻辑4：信任修正——防止 trust 为 0 时还在写甜蜜叙事（这种一致性在 narrative 生成端已加强，代码端保底）
+            if v['trust'] < 0.2 and v['closeness'] > 0.6:
+                v['trust'] = 0.25 # 强制维持最低限度的纽带，除非发生 breakup
             
             # --- 阶段自动映射状态机 ---
             c, t, a, r = v['closeness'], v['trust'], v['attraction'], v['respect']
