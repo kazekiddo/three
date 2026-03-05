@@ -22,6 +22,9 @@ class Database:
         """连接数据库"""
         if self.conn is None or self.conn.closed:
             self.conn = psycopg2.connect(self.database_url)
+            with self.conn.cursor() as cur:
+                # 强制当前会话使用北京时间
+                cur.execute("SET TIME ZONE 'Asia/Shanghai';")
             # 注册 pgvector 支持
             try:
                 register_vector(self.conn)
