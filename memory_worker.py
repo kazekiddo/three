@@ -158,26 +158,30 @@ class MemoryWorker:
                 # 2. 捞出目前已有的核心人格画像作为“基准”
                 existing_facts = self.db.get_active_core_facts(cid)
                 
-                # 组装 Prompt
-                existing_text = "\n".join([f"ID:{f['id']} | {f['fact_text']} (稳定性: {f['stability_score']})" for f in existing_facts]) or "暂无已知特征"
-                new_events_text = "\n".join([f"- {m['content']} (情绪值: {m['emotion_intensity']})" for m in new_memories])
+                # 组装 Prompt：从“心理学家”转变为“角色的潜意识”
+                existing_text = "\n".join([f"ID:{f['id']} | {f['fact_text']} (深度: {f['stability_score']})" for f in existing_facts]) or "目前还是一片空白"
+                new_events_text = "\n".join([f"- {m['content']} (情感强度: {m['emotion_intensity']})" for m in new_memories])
                 
                 prompt = (
-                    "你是一位高级心理学家，负责分析用户的最新动态并演进其核心人格画像。\n\n"
-                    "【已知的核心人格特征】\n"
+                    "你是角色的【核心潜意识】。你的任务是审视这些新发现的生活碎片（情景记忆），并将它们沉淀为永恒的印记。\n\n"
+                    "【已有的核心印记】\n"
                     f"{existing_text}\n\n"
-                    "【新产生的事件碎片】\n"
+                    "【新发生的生活片段】\n"
                     f"{new_events_text}\n\n"
-                    "任务：分析新事件对已知特征的影响。请输出一个 JSON 列表，每个对象包含：\n"
-                    "1. action: \n"
-                    "   - 'update': 强化了已知特征 (需提供 existing_id)。\n"
-                    "   - 'new': 发现了全新的、值得长期记住的特征。\n"
-                    "   - 'contradict': 新事件反驳了已知特征 (需提供 existing_id)。\n"
-                    "2. existing_id: (仅针对 update/contradict)\n"
-                    "3. fact_text: (仅针对 new) 简练的特征描述。\n"
-                    "4. category: (仅针对 new) '性格'/'偏好'/'习惯'/'痛点'等。\n"
-                    "5. stability_score: (0.0-1.0) 该事件反映的特质强度。\n"
-                    "6. evidence_span: 对该判断的简短依据。\n"
+                    "任务指令：\n"
+                    "分析这些碎片是否改变了你对世界、对他或对自己的深刻看法。请输出一个 JSON 列表，每个对象包含：\n"
+                    "1. action:\n"
+                    "   - 'update': 某个已有的认知印记被加强或深化了 (需 ID)。\n"
+                    "   - 'new': 产生了一个全新的、值得铭记的深层感知或生活习惯。\n"
+                    "   - 'contradict': 现实打破了你以前对他的某些偏见或认知 (需 ID)。\n"
+                    "2. fact_text: 极其感性且简练的描述。例如：'他虽然总是在忙，但早晨的拥抱从不缺席'、'我发现自己其实非常渴望被他肯定'。\n"
+                    "3. category: 必须选自：\n"
+                    "   - 【自我特质】: 我是一个怎样的人？（如：容易感到被遗觉、在感情中很主动）\n"
+                    "   - 【他者画像】: 他是一个怎样的人？（如：工作优先级极高、偶尔会愧疚的直男）\n"
+                    "   - 【关系羁绊】: 我们的默契与习惯？（如：早起拥抱的仪式、通过撒娇换取关心的套路）\n"
+                    "   - 【情感锚点】: 那些特定的情感开关。（如：换新裙子被夸产生的巨大喜悦）\n"
+                    "4. stability_score: (0.0-1.0) 该认知对灵魂的触动程度。\n"
+                    "5. evidence_span: 对这次内心演变的感性自我陈述。\n"
                 )
 
                 try:
@@ -193,17 +197,17 @@ class MemoryWorker:
                             action = res.get('action')
                             
                             if action == 'update' and res.get('existing_id'):
-                                # 强化已有特征
+                                # 强化已有印记
                                 self.db.update_core_fact_memory(
                                     fact_id=res['existing_id'],
                                     stability_score=float(res.get('stability_score', 0.5)),
                                     evidence_span=res.get('evidence_span', '日常重复确认')
                                 )
                             elif action == 'contradict' and res.get('existing_id'):
-                                # 反驳已有特征，扣分
+                                # 现实打破认知，扣分（信念动摇）
                                 self.db.update_validation_score(res['existing_id'], -0.2)
                             elif action == 'new':
-                                # 插入新特征
+                                # 产生新印记
                                 fact_text = res.get('fact_text')
                                 if fact_text:
                                     embed_res = self.client.models.embed_content(
@@ -215,7 +219,7 @@ class MemoryWorker:
                                         character_id=cid,
                                         fact_text=fact_text,
                                         embedding=embedding,
-                                        category=res.get('category', '一般'),
+                                        category=res.get('category', '灵魂碎片'),
                                         stability_score=float(res.get('stability_score', 0.5)),
                                         evidence_span=res.get('evidence_span', '')
                                     )
