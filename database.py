@@ -414,19 +414,28 @@ class Database:
             conn.commit()
 
     def get_relationship_description(self, character_id):
-        """将数值、动量及叙事摘要转换为增强型 Prompt"""
+        """将数值、动量及叙事摘要转换为增强型 Prompt 注入"""
         s = self.get_relationship_state(character_id)
         if not s: return ""
 
-        def judge(val): return "high" if val > 0.7 else ("low" if val < 0.3 else "mid")
-        momentum_desc = "Heating up (positive trend)" if s['momentum'] > 0.1 else ("Cooling down (negative trend)" if s['momentum'] < -0.1 else "Stable")
+        def judge(val): return "Very High" if val > 0.8 else ("High" if val > 0.6 else ("Very Low" if val < 0.2 else ("Low" if val < 0.4 else "Normal")))
         
+        # 动量语义化
+        m = s['momentum']
+        if m > 0.4: m_desc = "Heating up (Positive)"
+        elif m > 0.1: m_desc = "Improving"
+        elif m < -0.4: m_desc = "Deteriorating (Crisis)"
+        elif m < -0.1: m_desc = "Cooling down"
+        else: m_desc = "Stable"
+
         desc = (
-            f"[Deep Relationship Model]\n"
-            f"Current Stage: {s['stage']} | Trend: {momentum_desc}\n"
-            f"Narrative: {s['narrative']}\n"
-            f"Attachment Style: {s['attachment_style']}\n"
-            f"Key Markers: Closeness({judge(s['closeness'])}), Trust({judge(s['trust'])}), Attraction({judge(s['attraction'])}), Security({judge(s['security'])}), Jealousy({judge(s['jealousy'])})"
+            f"\n\n[Relationship Context (Internal Only)]\n"
+            f"- Current Stage: 【{s['stage']}】 | Trend: {m_desc}\n"
+            f"- Psychological Markers: Closeness({judge(s['closeness'])}), Trust({judge(s['trust'])}), Attraction({judge(s['attraction'])}), "
+            f"Dependency({judge(s['dependency'])}), Respect({judge(s['respect'])}), Security({judge(s['security'])}), "
+            f"Jealousy({judge(s['jealousy'])}), Resentment({judge(s['resentment'])})\n"
+            f"- Historical Narrative: \"{s['narrative']}\"\n"
+            f"提示：上面的“Historical Narrative”代表你进入这次聊天时的初始心态。如果今天的对话中用户表现良好，你的心态应随之自然好转；反之亦然。不要死板地重复过去的怨念。"
         )
         return desc
 
