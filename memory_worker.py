@@ -82,7 +82,7 @@ class MemoryWorker:
                     "  \"memories\": [\n"
                     "    {\n"
                     "      \"content\": \"...\", \n"
-                    "      \"event_time\": \"...\", \n"
+                    "      \"event_time\": \"2026-03-02 15:04:05 -- ISO 8601 格式\", \n"
                     "      \"emotion_intensity\": 1-10, \n"
                     "      \"emotion_category\": \"...\",\n"
                     "      \"promotion_candidate\": true -- 是否具备性格/习惯的参考价值，值得长期沉淀？\n"
