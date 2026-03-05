@@ -70,7 +70,7 @@ class MemoryWorker:
                     "   - *重要*：你的 `relationship_narrative` 必须与 `relational_events` 数值完全对应。\n"
                     "   - 如果在叙事中提到“愤怒”、“委屈”、“恨”或“失望”，则**必须**在 `relational_events` 中包含 `resentment` 的增量或 `trust` 的减量。\n"
                     "2. **记忆的时间锚点 (Memories)**：\n"
-                    "   - 通过 [系统时间感知] 推断具体时间。content 必须包含时间上下文（如：'3月2日晚上...'）。\n"
+                    "   - 通过 [系统时间感知] 推断具体时间。content 必须包含完整的时间上下文（如：'2026年3月2日晚上...'）。\n"
                     "3. **拟人化叙事 (Narrative)**：避免心理学术语。参考：0.4-0.6 仅为“有些不满”，不要写成“心碎/决裂”。用第一人称碎碎念的方式写。\n"
                     "4. **关系稳定性限制**：\n"
                     "   - 单次分析最多影响 2-3 个维度。targets 选自 [closeness, trust, attraction, dependency, respect, resentment, security, jealousy]。\n"
