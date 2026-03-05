@@ -198,22 +198,153 @@ class Database:
             return cur.fetchall()
 
 
-    def save_episodic_memory(self, character_id, content, emotion_intensity, promotion_candidate=True, embedding=None, event_time=None):
-        """保存提纯后的情景记忆（含向量和事件时间）"""
+    def save_episodic_memory(self, character_id, content, emotion_intensity, promotion_candidate=True, embedding=None, event_time=None, causal_link_id=None, emotion_category=None):
+        """保存提纯后的情景记忆（支持因果链和情绪分类）"""
         conn = self.connect()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO episodic_memories (character_id, content, emotion_intensity, promotion_candidate, embedding, event_time)
-                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    """INSERT INTO episodic_memories (character_id, content, emotion_intensity, promotion_candidate, embedding, event_time, causal_link_id, emotion_category)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                     (character_id, content, emotion_intensity, promotion_candidate,
                      np.array(embedding) if embedding is not None else None,
-                     event_time)
+                     event_time, causal_link_id, emotion_category)
                 )
                 conn.commit()
         except Exception as e:
             conn.rollback()
             raise e
+
+    def get_relationship_state(self, character_id):
+        """获取当前关系完整状态，包含依恋类型"""
+        conn = self.connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT s.*, c.attachment_style 
+                   FROM relationship_states s
+                   JOIN character_settings c ON s.character_id = c.id
+                   WHERE s.character_id = %s""", 
+                (character_id,)
+            )
+            return cur.fetchone()
+
+    def update_relationship_advanced(self, character_id, events, shock_events=None, new_narrative=None):
+        """
+        全量级演进系统：
+        1. 依恋类型修正 (Attachment Logic)
+        2. 离散事件 delta 惯性更新
+        3. 冲击性事件 (Shock Events) 乘法计算
+        4. 动量更新 (Momentum EMA)
+        5. 状态机阈值晋升 (Stage State Machine)
+        """
+        import math
+        conn = self.connect()
+        state = self.get_relationship_state(character_id)
+        if not state: return
+
+        attach = state['attachment_style']
+        MAP = {"strong_positive": 0.08, "positive": 0.04, "neutral": 0, "negative": -0.04, "strong_negative": -0.08}
+        
+        # --- 1. 计算离散事件累积 ---
+        total_deltas = {k: 0.0 for k in ['closeness', 'trust', 'resentment', 'dependency', 'attraction', 'respect', 'security', 'jealousy']}
+        for e in events:
+            t, i = e.get('target'), e.get('intensity')
+            if t in total_deltas and i in MAP:
+                delta = MAP[i]
+                # 依恋类型修正逻辑
+                if attach == 'anxious' and t == 'security' and delta < 0:
+                    total_deltas['dependency'] += 0.04
+                    total_deltas['jealousy'] += 0.04
+                    total_deltas['resentment'] += 0.02
+                elif attach == 'avoidant' and delta > 0 and t == 'closeness':
+                    delta *= 0.5 # 回避型对亲密增加更迟钝
+                    total_deltas['dependency'] -= 0.02
+                total_deltas[t] += delta
+
+        # --- 2. 动量计算 (EMA) ---
+        avg_delta = sum(total_deltas.values()) / len(total_deltas)
+        new_momentum = 0.8 * float(state['momentum']) + avg_delta
+        new_momentum = max(-1.0, min(1.0, new_momentum))
+
+        # --- 3. 基础演进逻辑 ---
+        new_vals = {}
+        decay = math.exp(-0.05 * ((datetime.now() - state['last_updated']).total_seconds() / 86400.0))
+        for k in total_deltas.keys():
+            v, d = float(state[k]), total_deltas[k]
+            if k == 'resentment': v *= decay
+            v = v + d * (1.0 - v) if d > 0 else v + d * v
+            new_vals[k] = max(0.0, min(1.0, v))
+
+        # --- 4. 冲击性事件 (乘法影响) ---
+        if shock_events:
+            for s in shock_events:
+                if s == 'betrayal':
+                    new_vals['trust'] *= 0.5
+                    new_vals['respect'] *= 0.7
+                    new_vals['resentment'] = min(1.0, new_vals['resentment'] + 0.3)
+                elif s == 'confession':
+                    new_vals['attraction'] = min(1.0, new_vals['attraction'] + 0.2)
+                    new_vals['closeness'] = min(1.0, new_vals['closeness'] + 0.1)
+
+        # --- 5. 状态机自动晋升 ---
+        stages = ['stranger', 'acquaintance', 'friend', 'close_friend', 'romantic', 'partner']
+        curr_idx = stages.index(state['stage']) if state['stage'] in stages else 0
+        new_stage = state['stage']
+        if curr_idx < len(stages) - 1:
+            next_stage = stages[curr_idx + 1]
+            # 晋升阈值定义
+            thresholds = {
+                'acquaintance': {'closeness': 0.2},
+                'friend': {'closeness': 0.35, 'trust': 0.3},
+                'close_friend': {'closeness': 0.5, 'trust': 0.5, 'respect': 0.4},
+                'romantic': {'closeness': 0.6, 'attraction': 0.65, 'trust': 0.5},
+                'partner': {'closeness': 0.8, 'attraction': 0.8, 'trust': 0.8, 'security': 0.7}
+            }
+            t = thresholds.get(next_stage)
+            if t and all(new_vals[k] >= v for k, v in t.items()):
+                new_stage = next_stage
+
+        # --- 6. 持久化 ---
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE relationship_states 
+                   SET closeness=%s, trust=%s, resentment=%s, dependency=%s, attraction=%s, 
+                       respect=%s, security=%s, jealousy=%s, momentum=%s, stage=%s, 
+                       narrative=COALESCE(%s, narrative), last_updated=CURRENT_TIMESTAMP
+                   WHERE character_id=%s""",
+                (new_vals['closeness'], new_vals['trust'], new_vals['resentment'], 
+                 new_vals['dependency'], new_vals['attraction'], new_vals['respect'], 
+                 new_vals['security'], new_vals['jealousy'], new_momentum, new_stage, 
+                 new_narrative, character_id)
+            )
+            conn.commit()
+
+    def get_relationship_description(self, character_id):
+        """将数值、动量及叙事摘要转换为增强型 Prompt"""
+        s = self.get_relationship_state(character_id)
+        if not s: return ""
+
+        def judge(val): return "high" if val > 0.7 else ("low" if val < 0.3 else "mid")
+        momentum_desc = "Heating up (positive trend)" if s['momentum'] > 0.1 else ("Cooling down (negative trend)" if s['momentum'] < -0.1 else "Stable")
+        
+        desc = (
+            f"[Deep Relationship Model]\n"
+            f"Current Stage: {s['stage']} | Trend: {momentum_desc}\n"
+            f"Narrative: {s['narrative']}\n"
+            f"Attachment Style: {s['attachment_style']}\n"
+            f"Key Markers: Closeness({judge(s['closeness'])}), Trust({judge(s['trust'])}), Attraction({judge(s['attraction'])}), Security({judge(s['security'])}), Jealousy({judge(s['jealousy'])})"
+        )
+        return desc
+
+    def get_recent_episodic_ids(self, character_id, limit=5):
+        """获取最近的几个情景记忆 ID 及其简述，用于建立因果链"""
+        conn = self.connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, content FROM episodic_memories WHERE character_id = %s ORDER BY created_at DESC LIMIT %s",
+                (character_id, limit)
+            )
+            return cur.fetchall()
 
     def search_episodic_memories(self, character_id, query_embedding, limit=5, time_start=None, time_end=None):
         """向量检索最相关的情景记忆，支持时间范围过滤"""
@@ -223,7 +354,7 @@ class Database:
                 if time_start and time_end:
                     # 指定时间范围：按纯相似度排序，不使用时间衰减
                     cur.execute(
-                        """SELECT id, content, emotion_intensity, event_time, created_at,
+                        """SELECT id, content, emotion_intensity, event_time, emotion_category, causal_link_id,
                                   1 - (embedding <=> %s::vector) AS similarity
                            FROM episodic_memories 
                            WHERE character_id = %s 
@@ -237,7 +368,7 @@ class Database:
                 else:
                     # 默认：余弦相似度 × 时间衰减因子（半衰期30天）
                     cur.execute(
-                        """SELECT id, content, emotion_intensity, event_time, created_at,
+                        """SELECT id, content, emotion_intensity, event_time, emotion_category, causal_link_id,
                                   1 - (embedding <=> %s::vector) AS similarity
                            FROM episodic_memories 
                            WHERE character_id = %s 

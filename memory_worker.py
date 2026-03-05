@@ -47,56 +47,55 @@ class MemoryWorker:
                     prefix = f"{m['context_prefix']} " if m.get('context_prefix') else ""
                     conversation += f"{prefix}{m['role']}: {m['content']}\n"
                 
+                # 获取最近的事件用于因果链参考
+                recent_events = self.db.get_recent_episodic_ids(cid, limit=5)
+                recent_events_text = "\n".join([f"ID: {e['id']} | 内容: {e['content']}" for e in recent_events])
+
                 prompt = (
-                    "分析以下对话，提取其中值得记忆的情景事件和用户状态。\n"
+                    "分析以下对话，提取情景事件、重要关系事件及动态叙事。\n"
                     "要求：\n"
-                    "1. 必须保留事件的时间信息。对话中的 [系统时间感知] 标签包含了精确时间，请据此推断每个事件大致发生的时间。\n"
-                    "2. content 中必须包含时间上下文，例如'2026年3月2日晚上，用户去了游乐场玩，感到很开心'。\n"
-                    "3. 不要只提取抽象的人格特质，具体的事件（去了哪里、做了什么、和谁一起）同样重要。\n"
-                    "4. 如果是纯日常寒暄或无意义的废话，忽略即可。\n\n"
+                    "1. **重要关系事件**：识别对话中影响关系的具体事件 (closeness, trust, attraction...)。\n"
+                    "2. **冲击性事件 (Shock Events)**：是否发生了重大转折？只需返回关键字：\n"
+                    "   - `betrayal` (背叛/欺骗), `confession` (表白), `breakup` (分手), `reconciliation` (和解)\n"
+                    "3. **关系叙事 (Narrative)**：用一句简短的话总结当前关系现状（例如：'你们的关系正在升温，但用户昨天的隐瞒让你感到一丝不安'）。\n"
+                    "4. **短期情绪**：mood, anger, affection, jealousy, sadness (0-1)。\n\n"
+                    f"【最近事件参考】\n{recent_events_text}\n\n"
                     f"对话记录：\n{conversation}\n\n"
-                    "请以JSON格式返回（数组），每个对象包含：\n"
-                    "- content: 提纯后的事实描述（必须包含时间上下文），例如'2026年3月2日晚上，用户去了游乐场，坐了过山车，说很刺激'\n"
-                    "- event_time: 事件发生的大致时间，ISO 8601格式（如'2026-03-02T20:00:00'），如果无法推断则为null\n"
-                    "- emotion_intensity: 1-10的情绪评分\n"
-                    "- promotion_candidate: 是否可能反映长期人格特质（涉及童年、偏好、习惯等为true，单次事件为false）\n"
+                    "请以JSON格式返回：\n"
+                    "{\n"
+                    "  \"memories\": [{ \"content\": \"...\", \"event_time\": \"...\", \"emotion_intensity\": 1-10, \"emotion_category\": \"...\" }],\n"
+                    "  \"relational_events\": [{ \"target\": \"trust\", \"intensity\": \"negative\" }],\n"
+                    "  \"shock_events\": [\"betrayal\"],\n"
+                    "  \"relationship_narrative\": \"目前的关系总结...\",\n"
+                    "  \"short_term_mood\": { \"mood\": 0.6, \"anger\": 0.1 }\n"
+                    "}"
                 )
 
                 try:
-                    # 使用 structured output 提取
                     response = self.client.models.generate_content(
                         model='gemini-2.5-flash',
                         contents=prompt,
-                        config={
-                            'response_mime_type': 'application/json'
-                        }
+                        config={'response_mime_type': 'application/json'}
                     )
                     
                     if response.text:
-                        results = json.loads(response.text)
+                        data = json.loads(response.text)
+                        
+                        # 1. 保存情景记忆
+                        results = data.get('memories', [])
                         for res in results:
                             content = res.get('content')
-                            if not content:
-                                continue
+                            if not content: continue
                             
-                            # 为情景记忆生成 embedding，用于后续向量检索
                             try:
-                                embed_res = self.client.models.embed_content(
-                                    model='gemini-embedding-001',
-                                    contents=content
-                                )
+                                embed_res = self.client.models.embed_content(model='gemini-embedding-001', contents=content)
                                 embedding = embed_res.embeddings[0].values
-                            except Exception as e:
-                                logger.error(f"生成情景记忆 embedding 失败: {e}")
-                                embedding = None
+                            except: embedding = None
 
-                            # 解析事件时间
                             event_time = None
                             if res.get('event_time'):
-                                try:
-                                    event_time = datetime.fromisoformat(res['event_time'])
-                                except (ValueError, TypeError):
-                                    pass
+                                try: event_time = datetime.fromisoformat(res['event_time'])
+                                except: pass
 
                             self.db.save_episodic_memory(
                                 character_id=cid,
@@ -104,10 +103,20 @@ class MemoryWorker:
                                 emotion_intensity=float(res.get('emotion_intensity', 5.0)),
                                 promotion_candidate=res.get('promotion_candidate', False),
                                 embedding=embedding,
-                                event_time=event_time
+                                event_time=event_time,
+                                causal_link_id=res.get('causal_link_id'),
+                                emotion_category=res.get('emotion_category')
                             )
+                        
+                        # 2. 调用高级演进系统
+                        self.db.update_relationship_advanced(
+                            cid, 
+                            events=data.get('relational_events', []),
+                            shock_events=data.get('shock_events', []),
+                            new_narrative=data.get('relationship_narrative')
+                        )
                 except Exception as e:
-                    logger.error(f"提取情景记忆失败 对于角色 {cid}: {e}")
+                    logger.error(f"提取情景及事件失败 对于角色 {cid}: {e}")
                     continue
 
                 processed_ids = [m['id'] for m in msgs]

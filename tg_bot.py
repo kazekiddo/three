@@ -448,7 +448,14 @@ class ChatAI:
                         time_str = ""
                         if mem.get('event_time'):
                             time_str = f" [{mem['event_time'].strftime('%Y年%m月%d日 %H:%M')}]"
-                        episodic_text += f"{i+1}.{time_str} {mem['content']}\n"
+                        emo_str = f" (情绪: {mem.get('emotion_category', '未知')})" if mem.get('emotion_category') else ""
+                        episodic_text += f"{i+1}.{time_str} {mem['content']}{emo_str}\n"
+
+                # 调取深度关系建模描述（第三层：解释式注入）
+                relation_desc = self.db.get_relationship_description(self.character_id)
+                if relation_desc:
+                    episodic_text += f"\n\n{relation_desc}"
+                    episodic_text += "\n\n【回复指南】请结合上述长期关系状态和当前短期情绪进行回复。你的行为应符合当前的关系阶段。如果是 jealous(嫉妒) 高位，请表现出占有欲；如果是 security(安全感) 低位，请表现出不安。"
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).error(f"检索记忆失败: {e}")
@@ -495,8 +502,11 @@ class ChatAI:
             for content in reversed(self.chat._curated_history):
                 if content.role == 'user':
                     for part in content.parts:
-                        if hasattr(part, 'text') and part.text and '\n\n[系统附加' in part.text:
-                            part.text = part.text[:part.text.index('\n\n[系统附加')]
+                        if hasattr(part, 'text') and part.text:
+                            # 识别并切割所有类型的系统注入标签
+                            for tag in ['\n\n[系统附加', '\n\n[Deep Relationship', '\n\n[系统时间感知']:
+                                if tag in part.text:
+                                    part.text = part.text[:part.text.index(tag)]
                     break
         except Exception:
             pass
