@@ -435,7 +435,8 @@ class Database:
             f"Dependency({judge(s['dependency'])}), Respect({judge(s['respect'])}), Security({judge(s['security'])}), "
             f"Jealousy({judge(s['jealousy'])}), Resentment({judge(s['resentment'])})\n"
             f"- Historical Narrative: \"{s['narrative']}\"\n"
-            f"提示：上面的“Historical Narrative”代表你进入这次聊天时的初始心态。如果今天的对话中用户表现良好，你的心态应随之自然好转；反之亦然。不要死板地重复过去的怨念。"
+            f"Reminder: The 'Historical Narrative' above represents your initial mindset when entering this conversation. If the user behaves well during today's conversation, your mindset should naturally improve accordingly; if not, it will worsen. Do not rigidly repeat past grievances.\n"
+            f"Output only the text spoken by the character, without including actions, gestures, or parenthetical descriptions. Do not write \"(hugging him)\", \"(whispering)\" or similar action texts.\n"
         )
         return desc
 
