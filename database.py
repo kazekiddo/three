@@ -333,8 +333,11 @@ class Database:
             # 信任软保底
             v['trust'] = max(v['trust'], 0.1)
             
-            # 逻辑2：依恋逻辑重组 (关联亲密、信任和安全)
-            # 依赖度应随着信任和安全感的崩塌而受限，防止产生病态的、逻辑不自洽的依恋
+            # 逻辑2：安全感锚定信任 (Trust-Security Anchor)
+            # 如果不信任对方，安全感必然会受到拖累
+            v['security'] = 0.45 * v['trust'] + 0.55 * v['security']
+
+            # 逻辑3：依恋逻辑重组 (关联亲密、信任和安全)
             target_dep = 0.4 * v['closeness'] + 0.3 * v['trust'] + 0.3 * v['security']
             # 当前依赖度向目标依赖度缓慢靠拢 (惯性)
             v['dependency'] = 0.7 * v['dependency'] + 0.3 * target_dep
