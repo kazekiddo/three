@@ -51,40 +51,44 @@ class MemoryWorker:
                 recent_events = self.db.get_recent_episodic_ids(cid, limit=5)
                 recent_events_text = "\n".join([f"ID: {e['id']} | 内容: {e['content']}" for e in recent_events])
 
-                # 获取所有维度状态感知
+                # 获取当前心理基准（状态感知）
                 curr_state = self.db.get_relationship_state(cid)
                 state_text = "未知"
                 if curr_state:
                     state_text = (
-                        f"阶段: {curr_state.get('stage')} | 依恋类型: {curr_state.get('attachment_style')}\n"
-                        f"亲密: {curr_state.get('closeness', 0):.2f}, 信任: {curr_state.get('trust', 0):.2f}, 吸引: {curr_state.get('attraction', 0):.2f}, "
-                        f"依赖: {curr_state.get('dependency', 0):.2f}, 尊重: {curr_state.get('respect', 0):.2f}, 怨念: {curr_state.get('resentment', 0):.2f}, "
-                        f"安全: {curr_state.get('security', 0):.2f}, 嫉妒: {curr_state.get('jealousy', 0):.2f}"
+                        f"当前阶段: {curr_state.get('stage')} | 依恋风格: {curr_state.get('attachment_style')}\n"
+                        f"分值: 亲密({curr_state.get('closeness', 0):.2f}), 信任({curr_state.get('trust', 0):.2f}), 吸引({curr_state.get('attraction', 0):.2f}), "
+                        f"依赖({curr_state.get('dependency', 0):.2f}), 尊重({curr_state.get('respect', 0):.2f}), 怨念({curr_state.get('resentment', 0):.2f}), "
+                        f"安全({curr_state.get('security', 0):.2f}), 嫉妒({curr_state.get('jealousy', 0):.2f})"
                     )
 
                 prompt = (
-                    "你是一位顶级心理博弈与情感专家。请根据【当前心理基准】和【最新对话内容】，为角色生成深度反思报告。\n"
-                    f"【当前心理基准分值】\n{state_text}\n\n"
-                    "任务要求：\n"
-                    "1. **长期情景记忆 (Memories)**：\n"
-                    "   - 必须通过消息中的 [系统时间感知] 标签推断事件的具体发生日期时间。\n"
-                    "   - content 必须包含时间上下文，例如'2026年3月2日晚上，用户没有履行承诺...'。\n"
-                    "2. **关系维度演进 (Relational Events)**：\n"
-                    "   - **targets**: 必须从 [closeness, trust, attraction, dependency, respect, resentment, security, jealousy] 中选择。\n"
-                    "   - **intensities**: 必须从 [strong_positive, positive, neutral, negative, strong_negative] 中选择。\n"
-                    "   - **逻辑补差**：若当前信任极低且怨念极高，正向激励需大打折扣或不计入。\n"
-                    "3. **冲击性事件 (Shock Events)**：识别重大转折，返回关键字列表（如：betrayal, confession, breakup, reconciliation）。\n"
-                    "4. **关系叙事总结 (Narrative)**：必须严格符合分值。禁止在怨念高、信任崩塌时使用'关系甜蜜、依恋'。请用感性但逻辑自洽的语气总结你们现在的心理距离和博弈现状。\n"
-                    "5. **短期情绪提取**：提供 mood, anger, affection, jealousy, sadness 的实时分值 (0-1)。\n\n"
-                    f"【最近事件参考】\n{recent_events_text}\n\n"
-                    f"对话记录：\n{conversation}\n\n"
-                    "请以JSON格式返回：\n"
+                    "你是角色的【内心旁白系统】，负责记录她对关系的真实感受变化。请根据当前状态和最新对话，推断她的情绪起伏、关系影响和记忆碎片。\n\n"
+                    f"【目前她的内心基准】\n{state_text}\n\n"
+                    "请遵循以下“内心运行规则”进行分析：\n"
+                    "1. **记忆的时间锚点 (Memories)**：\n"
+                    "   - 必须通过消息中的 [系统时间感知] 标签推断事件的具体发生时间。\n"
+                    "   - 【content】必须包含时间上下文（如：'3月2日晚上，用户没有履行承诺...'）。\n"
+                    "   - 【event_time】必须填入推断的日期时间字符串。\n"
+                    "2. **拟人化叙事 (Narrative)**：避免心理学术语，像真人一样回顾感受。参考分值：\n"
+                    "   - 0.0-0.2: 轻松愉快 | 0.2-0.4: 小摩擦 | 0.4-0.6: 有些不满 | 0.6-0.8: 明显矛盾 | 0.8-1.0: 严重冲突。\n"
+                    "   - 严禁过度戏剧化，0.6 的怨念只是“挺不爽的”，不是“世界毁灭”。\n"
+                    "3. **关系稳定性机制 (Events)**：\n"
+                    "   - 单次分析中，【relational_events】最多只能影响 2-3 个维度。\n"
+                    "   - targets 必须选自: [closeness, trust, attraction, dependency, respect, resentment, security, jealousy]。\n"
+                    "   - intensities 必须选自: [strong_positive, positive, neutral, negative, strong_negative]。\n"
+                    "4. **时间衰减与冲击限制**：\n"
+                    "   - 怨念会随时间淡化。若表现出和解或日常化，应产生正向事件对冲怨念。\n"
+                    "   - 【shock_events】仅在重大转折（正式表白、确立关系、正式分手、严重背叛）时触发。\n\n"
+                    f"【最近内心碎片】\n{recent_events_text}\n\n"
+                    f"【最新对话片段】\n{conversation}\n\n"
+                    "请以 JSON 格式返回她当下的内心报告：\n"
                     "{\n"
                     "  \"memories\": [{ \"content\": \"...\", \"event_time\": \"...\", \"emotion_intensity\": 1-10, \"emotion_category\": \"...\" }],\n"
                     "  \"relational_events\": [{ \"target\": \"trust\", \"intensity\": \"negative\" }],\n"
-                    "  \"shock_events\": [\"betrayal\"],\n"
-                    "  \"relationship_narrative\": \"深刻的叙事总结...\",\n"
-                    "  \"short_term_mood\": { \"mood\": 0.6, \"anger\": 0.1, \"affection\": 0.2, \"jealousy\": 0.1, \"sadness\": 0.4 }\n"
+                    "  \"shock_events\": [],\n"
+                    "  \"relationship_narrative\": \"用内心独白的口吻写一句感性总结...\",\n"
+                    "  \"short_term_mood\": { \"mood\": 0.6, \"anger\": 0.1, \"affection\": 0.2, \"jealousy\": 0.1, \"sadness\": 0.4, \"anxiety\": 0.3 }\n"
                     "}"
                 )
 
