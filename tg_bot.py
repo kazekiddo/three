@@ -310,21 +310,39 @@ class ChatAI:
                 logger.error(f"AI 生成图片失败: {e}")
                 return f"生成图片失败: {str(e)}"
 
-        self.tools = [generate_image]
+        def register_reminder(remind_at_str: str, content: str) -> str:
+            """当你答应要在未来某个时间提醒思远做某事时，必须调用此函数将任务存入你的记忆。
+            参数:
+                remind_at_str: 提醒的具体时间, 格式为 'YYYY-MM-DD HH:MM:SS'。请务必根据注入的当前系统时间准确推算。
+                content: 提醒的具体内容（如'修空调管道'）。
+            """
+            try:
+                # 转换时间字符串为 datetime 对象，兼容不带秒的情况
+                try:
+                    remind_at = datetime.datetime.strptime(remind_at_str, '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    remind_at = datetime.datetime.strptime(remind_at_str, '%Y-%m-%d %H:%M')
+                
+                # 存入数据库
+                self.db.add_reminder(self.character_id, ALLOWED_USER_ID, content, remind_at) 
+                return f"SUCCESS: 我已经妥善记下了。我会在 {remind_at_str} 准时提醒你：{content}。"
+            except Exception as e:
+                logger.error(f"注册提醒失败: {e}")
+                return f"ERROR: 记下提醒时出错了: {str(e)}"
+
+        self.tools = [generate_image, register_reminder]
         self.pending_output_image = None
         
         # 创建聊天
         config = {'automatic_function_calling': {}}
         if system_instruction:
-            # 追加图片工具使用约束，防止模型试图直接输出图片
-            image_constraint = (
-                "\n\n【重要工具使用规则】"
-                "你不能直接输出或嵌入图片。你没有原生图片输出能力。"
-                "当用户请求图片、自拍、照片时，你必须调用 generate_image 工具函数来生成图片。"
-                "绝对不要在回复中写 'Here is the original image' 或类似的占位文字。"
-                "调用工具后，系统会自动将图片发送给用户。"
+            reminder_constraint = (
+                "\n\n【提醒与记性规则】"
+                "你拥有‘记事’能力。如果你在对话中最终答应了要在未来某个时间提醒思远某事，"
+                "请务必调用 register_reminder 工具函数将任务存入你的记忆（不要只是口头答应）。"
+                "如果只是随口说说或拒绝了，则不要调用。调用工具代表你‘记在了脑子里’，系统会在那个时刻强制提醒你发起谈话。"
             )
-            self.system_instruction = system_instruction + image_constraint
+            self.system_instruction = system_instruction + image_constraint + reminder_constraint
             config['system_instruction'] = self.system_instruction
         config['tools'] = self.tools
 
@@ -868,6 +886,51 @@ def evaluate_proactive_intent(chat_ai, user_silence_seconds: float, total_silenc
         return False, ""
 
 
+async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    """每分钟扫描一次提醒任务，并触发提醒消息"""
+    import asyncio
+    db = Database()
+    try:
+        due_reminders = db.get_due_reminders()
+        for rem in due_reminders:
+            uid = int(rem['user_id'])
+            chat_ai = user_chats.get(uid)
+            if not chat_ai:
+                continue
+            
+            # 使用现有流程发送主动消息
+            reminder_hint = (
+                f"[系统重要提醒] 现在时间到了！你之前在对话中亲口答应过思远，要在此时提醒他这件事：'{rem['task_content']}'。"
+                f"请立即用你目前的角色语气，自然地对他发起提醒。不要生硬，要符合你们互动的氛围。直接说出你想提醒的话，不要提到这是‘系统任务’。"
+            )
+            
+            response_text, image_path = chat_ai.send_proactive_message(reminder_hint)
+            
+            if not response_text.strip() and not image_path:
+                continue
+
+            # 发送逻辑
+            if image_path and os.path.exists(image_path):
+                await context.bot.send_photo(chat_id=uid, photo=open(image_path, 'rb'))
+
+            if response_text.strip():
+                lines = response_text.split('\n')
+                char_delay = 60.0 / 120.0
+                for line in lines:
+                    if line.strip():
+                        await context.bot.send_chat_action(chat_id=uid, action="typing")
+                        # 模拟打字延迟
+                        await asyncio.sleep(min(len(line.strip()) * char_delay, 5))
+                        await context.bot.send_message(chat_id=uid, text=line.strip())
+            
+            # 标记为已发送
+            db.mark_reminder_sent(rem['id'])
+    except Exception as e:
+        logger.error(f"reminder_job 出错: {e}")
+    finally:
+        db.close()
+
+
 def _schedule_next_proactive_check(context):
     """安排下一次主动意愿检查，间隔随机 600~1500 秒（10~25 分钟），保证无规律感。"""
     import random
@@ -1037,6 +1100,9 @@ def main():
     # 之后每轮由 proactive_check_job 自身动态安排下次，间隔同样随机 10~25 分钟，保证无规律感
     import random
     job_queue.run_once(proactive_check_job, when=random.randint(600, 1500))
+
+    # 注册提醒任务扫描：每分钟检查一次是否有到期的提醒
+    job_queue.run_repeating(reminder_job, interval=60, first=10)
 
     # 启动机器人
     print("Telegram Bot 已启动，记忆漏斗任务已注册")

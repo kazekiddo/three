@@ -377,4 +377,42 @@ class Database:
             if score < 0.3:
                 cur.execute("UPDATE core_fact_memories SET is_archived = true WHERE id = %s", (fact_id,))
             conn.commit()
-    # --- 记忆漏斗方法结束 ---
+    # --- 提醒任务方法开始 ---
+
+    def add_reminder(self, character_id, user_id, task_content, remind_at):
+        """保存提醒任务"""
+        conn = self.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO reminders (character_id, user_id, task_content, remind_at) 
+                       VALUES (%s, %s, %s, %s)""",
+                    (character_id, user_id, task_content, remind_at)
+                )
+                conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
+
+    def get_due_reminders(self):
+        """获取到期需发送的提醒"""
+        conn = self.connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT id, character_id, user_id, task_content 
+                   FROM reminders 
+                   WHERE status = 'pending' AND remind_at <= NOW() 
+                   ORDER BY remind_at ASC"""
+            )
+            return cur.fetchall()
+
+    def mark_reminder_sent(self, reminder_id):
+        """标记提醒已发送"""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE reminders SET status = 'sent' WHERE id = %s",
+                (reminder_id,)
+            )
+            conn.commit()
+    # --- 提醒任务方法结束 ---
