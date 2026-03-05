@@ -322,23 +322,48 @@ class Database:
                     new_vals['attraction'] = min(1.0, new_vals['attraction'] + 0.2)
                     new_vals['closeness'] = min(1.0, new_vals['closeness'] + 0.1)
 
-        # --- 5. 状态机自动晋升 ---
-        stages = ['stranger', 'acquaintance', 'friend', 'close_friend', 'romantic', 'partner']
-        curr_idx = stages.index(state['stage']) if state['stage'] in stages else 0
-        new_stage = state['stage']
-        if curr_idx < len(stages) - 1:
-            next_stage = stages[curr_idx + 1]
-            # 晋升阈值定义
-            thresholds = {
-                'acquaintance': {'closeness': 0.2},
-                'friend': {'closeness': 0.35, 'trust': 0.3},
-                'close_friend': {'closeness': 0.5, 'trust': 0.5, 'respect': 0.4},
-                'romantic': {'closeness': 0.6, 'attraction': 0.65, 'trust': 0.5},
-                'partner': {'closeness': 0.8, 'attraction': 0.8, 'trust': 0.8, 'security': 0.7}
-            }
-            t = thresholds.get(next_stage)
-            if t and all(new_vals[k] >= v for k, v in t.items()):
-                new_stage = next_stage
+        # --- 5. 一致性校验与阶段演进 (Sanity Check & Evolution) ---
+        def _apply_sanity_check(v, s_name):
+            # 逻辑1：安全感与嫉妒心的关联
+            if v['security'] < 0.4:
+                v['jealousy'] = max(v['jealousy'], 0.15)
+            # 逻辑2：当亲密度很高时，依恋度不应极低
+            if v['closeness'] > 0.5:
+                v['dependency'] = max(v['dependency'], 0.3)
+            # 逻辑3：怨念极高时，信任度会自动受挫
+            if v['resentment'] > 0.6:
+                v['trust'] *= 0.8
+            
+            # --- 阶段自动映射状态机 ---
+            c, t, a, r = v['closeness'], v['trust'], v['attraction'], v['respect']
+            sec = v['security']
+            
+            if c >= 0.8 and a >= 0.8 and t >= 0.7:
+                new_s = 'partner'
+            elif c >= 0.65 and a >= 0.6:
+                new_s = 'romantic'
+            elif c >= 0.55 and t >= 0.4:
+                new_s = 'close_friend'
+            elif c >= 0.45 and t >= 0.25:
+                new_s = 'friend'
+            elif c >= 0.2:
+                new_s = 'acquaintance'
+            else:
+                new_s = 'stranger'
+            
+            # 限制关系降级不要太快 (动量保护)
+            stages = ['stranger', 'acquaintance', 'friend', 'close_friend', 'romantic', 'partner']
+            curr_idx = stages.index(s_name) if s_name in stages else 0
+            new_idx = stages.index(new_s)
+            
+            # 锁死逻辑：如果信任度和亲密度没跌破当前阶段地板，不轻易降级
+            if new_idx < curr_idx:
+                if (curr_idx == 2 and c > 0.35) or (curr_idx >= 4 and c > 0.5):
+                    new_s = s_name
+
+            return v, new_s
+
+        new_vals, new_stage = _apply_sanity_check(new_vals, state['stage'])
 
         # --- 6. 持久化 ---
         with conn.cursor() as cur:
