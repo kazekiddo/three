@@ -216,7 +216,7 @@ class Database:
             raise e
 
     def get_relationship_state(self, character_id):
-        """获取当前关系完整状态，包含依恋类型"""
+        """获取当前关系完整状态，包含依恋类型（如不存在则自动初始化）"""
         conn = self.connect()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -226,7 +226,24 @@ class Database:
                    WHERE s.character_id = %s""", 
                 (character_id,)
             )
-            return cur.fetchone()
+            state = cur.fetchone()
+            if not state:
+                # 自动初始化关系状态
+                cur.execute(
+                    "INSERT INTO relationship_states (character_id) VALUES (%s) ON CONFLICT (character_id) DO NOTHING",
+                    (character_id,)
+                )
+                conn.commit()
+                # 重新查询
+                cur.execute(
+                    """SELECT s.*, c.attachment_style 
+                       FROM relationship_states s
+                       JOIN character_settings c ON s.character_id = c.id
+                       WHERE s.character_id = %s""", 
+                    (character_id,)
+                )
+                state = cur.fetchone()
+            return state
 
     def update_relationship_advanced(self, character_id, events, shock_events=None, new_narrative=None):
         """
@@ -243,12 +260,24 @@ class Database:
         if not state: return
 
         attach = state['attachment_style']
-        MAP = {"strong_positive": 0.08, "positive": 0.04, "neutral": 0, "negative": -0.04, "strong_negative": -0.08}
-        
-        # --- 1. 计算离散事件累积 ---
+        # 映射表
+        MAP = {
+            "strong_positive": 0.08, "strong-positive": 0.08,
+            "positive": 0.04, "neutral": 0.0, 
+            "negative": -0.04, "strong-negative": -0.08, "strong_negative": -0.08
+        }
+
+        # 计算时间流逝产生的自然衰减 (K=0.05)
+        # 按照数据库会话设置，直接使用本地时间进行对比
+        now_dt = datetime.now()
+        days_passed = (now_dt - state['last_updated']).total_seconds() / 86400.0
+        decay_factor = math.exp(-0.05 * days_passed)
+
+        # 汇总所有事件对每个维度的影响
         total_deltas = {k: 0.0 for k in ['closeness', 'trust', 'resentment', 'dependency', 'attraction', 'respect', 'security', 'jealousy']}
         for e in events:
-            t, i = e.get('target'), e.get('intensity')
+            t = e.get('target', '').lower()
+            i = e.get('intensity', '').lower()
             if t in total_deltas and i in MAP:
                 delta = MAP[i]
                 # 依恋类型修正逻辑
@@ -257,22 +286,29 @@ class Database:
                     total_deltas['jealousy'] += 0.04
                     total_deltas['resentment'] += 0.02
                 elif attach == 'avoidant' and delta > 0 and t == 'closeness':
-                    delta *= 0.5 # 回避型对亲密增加更迟钝
+                    delta *= 0.5 
                     total_deltas['dependency'] -= 0.02
                 total_deltas[t] += delta
 
+        print(f"DEBUG: 关系偏移分析完成 -> {total_deltas}")
+
         # --- 2. 动量计算 (EMA) ---
-        avg_delta = sum(total_deltas.values()) / len(total_deltas)
-        new_momentum = 0.8 * float(state['momentum']) + avg_delta
+        raw_sum = sum(total_deltas.values())
+        new_momentum = 0.8 * float(state['momentum'] or 0) + raw_sum
         new_momentum = max(-1.0, min(1.0, new_momentum))
 
         # --- 3. 基础演进逻辑 ---
         new_vals = {}
-        decay = math.exp(-0.05 * ((datetime.now() - state['last_updated']).total_seconds() / 86400.0))
         for k in total_deltas.keys():
-            v, d = float(state[k]), total_deltas[k]
-            if k == 'resentment': v *= decay
-            v = v + d * (1.0 - v) if d > 0 else v + d * v
+            v, d = float(state[k] or 0.0), total_deltas[k]
+            # 基础衰减
+            if k == 'resentment': v *= decay_factor
+            
+            if d > 0:
+                v = v + d * (1.0 - v)
+            elif d < 0:
+                v = v + d * v
+            
             new_vals[k] = max(0.0, min(1.0, v))
 
         # --- 4. 冲击性事件 (乘法影响) ---
