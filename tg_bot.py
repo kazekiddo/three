@@ -2,6 +2,7 @@ import os
 import re
 import logging
 import json
+import random
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -141,6 +142,9 @@ class ChatAI:
         self.proactive_streak_count = 0
         self.proactive_streak_date = None
         self.proactive_blocked_date = None
+        self.last_proactive_image_timestamp = None
+        self.proactive_image_cooldown_seconds = int(os.getenv("PROACTIVE_IMAGE_COOLDOWN_SECONDS", "3600"))
+        self.proactive_image_probability = float(os.getenv("PROACTIVE_IMAGE_PROBABILITY", "0.35"))
         
         # 预加载角色设定图和用户（思远）设定图 (用于视觉一致性)
         self.character_photo_path = "/data/three/media/photos/photo_nanase.jpg"
@@ -414,6 +418,51 @@ class ChatAI:
         return "上网" in text
 
     @staticmethod
+    def _should_prefer_image_response(message: str, image_data=None) -> bool:
+        """轻触发：命中视觉化意图时，偏好让模型走图片工具。"""
+        if image_data is not None:
+            return True
+        if not message:
+            return False
+
+        text = message.strip().lower()
+        if not text:
+            return False
+
+        visual_keywords = [
+            # 通用视觉请求
+            "图片", "照片", "拍", "图", "配图", "发图", "来图", "看图",
+            "发一张", "来一张", "给我一张", "看一下", "看看", "看下", "看一眼",
+            "长什么样", "样子", "外观", "给我看看", "让我看看", "给你看看",
+            "做个图", "生成图", "画一张", "插画", "壁纸", "头像",
+        ]
+        return any(keyword in text for keyword in visual_keywords)
+
+    def _should_trigger_proactive_image(self, message: str, image_data=None) -> bool:
+        """主动发图触发器：不依赖用户索图语句，按冷却+概率触发。"""
+        if image_data is not None:
+            return False
+        if self.proactive_image_probability <= 0:
+            return False
+
+        now_dt = datetime.datetime.now()
+        if self.last_proactive_image_timestamp:
+            elapsed = (now_dt - self.last_proactive_image_timestamp).total_seconds()
+            if elapsed < self.proactive_image_cooldown_seconds:
+                return False
+
+        text = (message or "").strip()
+        if not text:
+            return False
+
+        # 避免在明显任务型指令中硬插图片，保持自然感
+        task_like_keywords = ["提醒", "几点", "时间", "上网", "查", "/"]
+        if any(k in text for k in task_like_keywords):
+            return False
+
+        return random.random() < min(max(self.proactive_image_probability, 0.0), 1.0)
+
+    @staticmethod
     def _extract_response_text(response) -> str:
         text = ""
         try:
@@ -624,6 +673,7 @@ class ChatAI:
     def send_message(self, message, image_data=None, image_mime_type=None, media_path=None):
         """发送消息并获取回复"""
         context_prefix = None
+        proactive_image_forced = False
         
         # 处理时间连续性感知架构 (判断与上一条用户消息的时间差)
         if self.character_id:
@@ -719,6 +769,24 @@ class ChatAI:
         if episodic_text:
             augmented_message += episodic_text
 
+        # 轻触发图片偏好：命中视觉化意图时，优先让模型调用图片工具
+        if self._should_prefer_image_response(message, image_data=image_data):
+            augmented_message += (
+                "\n\n[系统附加本轮回复偏好]\n"
+                "用户本轮是视觉化诉求。请优先调用 generate_image 生成图片，并将文字回复控制在 1 句以内。"
+                "如果用户要求的是你/他的外观、自拍或场景展示，务必先出图，再补一句自然说明。"
+            )
+
+        # 与用户措辞无关的主动发图策略：按概率触发，让角色在日常聊天中主动分享图片
+        if self._should_trigger_proactive_image(message, image_data=image_data):
+            proactive_image_forced = True
+            augmented_message += (
+                "\n\n[系统附加主动分享策略]\n"
+                "本轮请你主动分享一张图片，即使用户没有要求图片。"
+                "你需要先调用 generate_image，内容选择你此刻最自然想分享的生活片段（如正在做的事、当下状态、想给对方看的瞬间）。"
+                "文字只保留 1 句，语气自然，不要提及系统或工具。"
+            )
+
         # B-1：按需联网搜索（独立请求），再把摘要注入当前轮上下文
         web_search_text = ""
         if self._should_use_web_search(message):
@@ -772,6 +840,8 @@ class ChatAI:
         
         # 提取生成图片的路径（如果有的话）
         image_path = self.pending_output_image
+        if proactive_image_forced and image_path:
+            self.last_proactive_image_timestamp = datetime.datetime.now()
         
         # 保存AI回复（只有非空时才保存）
         if self.character_id and (response_text.strip() or image_path):
