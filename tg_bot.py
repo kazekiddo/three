@@ -318,11 +318,17 @@ class ChatAI:
                 content: 提醒的具体内容（如'修空调管道'）。
             """
             try:
-                # 转换时间字符串为 datetime 对象，兼容不带秒的情况
-                try:
-                    remind_at = datetime.datetime.strptime(remind_at_str, '%Y-%m-%d %H:%M:%S')
-                except ValueError:
-                    remind_at = datetime.datetime.strptime(remind_at_str, '%Y-%m-%d %H:%M')
+                remind_at = None
+                raw = str(remind_at_str).strip() if remind_at_str else ""
+                if raw:
+                    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+                        try:
+                            remind_at = datetime.datetime.strptime(raw, fmt)
+                            break
+                        except ValueError:
+                            continue
+                if not remind_at:
+                    return f"ERROR: 提醒时间无法识别（{remind_at_str}），请给出更明确的时间。"
                 
                 # 存入数据库
                 self.db.add_reminder(self.character_id, ALLOWED_USER_ID, content, remind_at) 
@@ -350,7 +356,8 @@ class ChatAI:
                 "\n\n【角色化记忆规则】"
                 "你拥有‘提醒’能力。但请记住你目前的身份和性格，你不是思远的私人秘书。对于他提出的提醒要求，你应该根据当时的心情来决定是否帮忙。"
                 "如果觉得他太依赖你、或者你正在闹别扭，你可以拒绝、抱怨、让他自己去记、或者要求他稍微求求你才行。不要像个无情的自动办公软件一样秒答应。"
-                "只有当你‘内心软化’并最终明确表示‘好吧，我帮你记一下吧’时，才必须调用 register_reminder 工具。如果你还在拒绝、推辞或开玩笑，绝对不要调用该工具。"
+                "只要你给出了任何明确承诺（例如“我帮你记着”“我会提醒你”“行，我记下了”），就必须在同一轮立即调用 register_reminder 工具，不能只口头答应不落库。"
+                "如果时间不够明确（例如只说“晚上”但没有日期），你必须先追问澄清时间，再决定是否调用工具。"
                 "记住，你一旦调用了工具，就代表你‘真的答应了’，这种承诺对你来说是很正式的，要表现出那种‘虽然很麻烦但为了你还是破例一次’的傲娇感。"
             )
             self.system_instruction = system_instruction + image_constraint + reminder_constraint
