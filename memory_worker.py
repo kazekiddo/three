@@ -172,106 +172,6 @@ class MemoryWorker:
 
         return normalized_memories, normalized_events, shock_events, narrative
 
-    @staticmethod
-    def _is_similar_memory_text(text_a, text_b):
-        a = (text_a or "").strip()
-        b = (text_b or "").strip()
-        if not a or not b:
-            return False
-        if a in b or b in a:
-            return True
-        a_tokens = set(re.findall(r'[\u4e00-\u9fffA-Za-z0-9]{2,}', a))
-        b_tokens = set(re.findall(r'[\u4e00-\u9fffA-Za-z0-9]{2,}', b))
-        if not a_tokens or not b_tokens:
-            return False
-        overlap = len(a_tokens & b_tokens) / max(1, min(len(a_tokens), len(b_tokens)))
-        return overlap >= 0.7
-
-    def _summarize_daily_cycle_as_memories(self, cycle_msgs, cycle_start, cycle_end):
-        """基于周期内完整对话，让模型补充日记式的日常事件记忆。"""
-        if not cycle_msgs:
-            return []
-
-        cycle_text = (
-            f"{cycle_start.strftime('%Y-%m-%d %H:%M:%S %z')} ~ "
-            f"{cycle_end.strftime('%Y-%m-%d %H:%M:%S %z')} (北京时间)"
-        )
-        dialogue_text = []
-        for msg in cycle_msgs:
-            ts = msg.get("timestamp")
-            ts_text = self._to_bjt(ts).strftime("%Y-%m-%dT%H:%M:%S%z") if ts else "unknown"
-            role = msg.get("role", "user")
-            content = re.sub(r'\[[^\]]+\]', '', (msg.get("content") or "").strip())
-            if not content:
-                continue
-            dialogue_text.append(f"- [{ts_text}] {role}: {content}")
-
-        if not dialogue_text:
-            return []
-
-        dialogue_block = "\n".join(dialogue_text)
-        prompt = (
-            "你是记忆整理助手。请基于下面这个周期的完整对话，提炼“日常但对后续连续性有价值”的事件，"
-            "写成自然、简洁、像日记的记录。不要抄原话，不要命令句口吻。\n\n"
-            f"【周期】\n{cycle_text}\n\n"
-            f"【完整对话】\n{dialogue_block}\n\n"
-            "输出要求：\n"
-            "1) 只输出合法 JSON 对象，不要 markdown。\n"
-            "2) 最多输出 5 条 memories。\n"
-            "3) 仅保留会影响后续对话连续性的日常事件（如待办、约定、计划变化、承诺）。\n"
-            "4) 每条 memory 的 content 用日记叙述，不要写“他说/她说原句”。\n"
-            "5) event_time 尽量用 RFC3339；不确定则为 null。\n"
-            "JSON 结构：\n"
-            "{"
-            "\"memories\":[{\"content\":\"...\",\"event_time\":\"2026-03-02T18:30:00+08:00\",\"emotion_intensity\":3.0,\"emotion_category\":\"daily_life\",\"promotion_candidate\":true}]"
-            "}"
-        )
-
-        try:
-            response = self.client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt,
-                config={'response_mime_type': 'application/json'}
-            )
-            if not response.text:
-                return []
-            json_text = self._extract_json_text(response.text)
-            data = json.loads(json_text)
-            memories = data.get("memories", []) if isinstance(data, dict) else []
-            normalized = []
-            if isinstance(memories, list):
-                for item in memories:
-                    if not isinstance(item, dict):
-                        continue
-                    content = (item.get("content") or "").strip()
-                    if not content:
-                        continue
-                    normalized.append({
-                        "content": content,
-                        "emotion_intensity": float(self._clamp(float(item.get("emotion_intensity", 3.0)), 1.0, 10.0)),
-                        "promotion_candidate": bool(item.get("promotion_candidate", True)),
-                        "event_time": self._parse_event_time(item.get("event_time")),
-                        "causal_link_id": None,
-                        "emotion_category": (item.get("emotion_category") or "daily_life").strip() or "daily_life"
-                    })
-                    if len(normalized) >= 5:
-                        break
-            return normalized
-        except Exception as e:
-            logger.error(f"周期日常总结失败: {e}")
-            return []
-
-    def _merge_memories_with_fallback(self, llm_memories, fallback_memories, max_total=12):
-        merged = list(llm_memories or [])
-        for fb in fallback_memories or []:
-            duplicated = any(self._is_similar_memory_text(x.get("content"), fb.get("content")) for x in merged)
-            if duplicated:
-                continue
-            merged.append(fb)
-            if len(merged) >= max_total:
-                break
-        return merged
-
     def _normalize_consolidate_items(self, data):
         if not isinstance(data, list):
             return []
@@ -414,10 +314,6 @@ class MemoryWorker:
                             json_text = self._extract_json_text(response.text)
                             data = json.loads(json_text)
                             memories, rel_events, shock_events, relationship_narrative = self._normalize_filter_payload(data)
-                            fallback_memories = self._summarize_daily_cycle_as_memories(
-                                cycle_msgs, cycle_start, cycle_end
-                            )
-                            memories = self._merge_memories_with_fallback(memories, fallback_memories)
 
                             # 1. 保存情景记忆
                             for mem in memories:
