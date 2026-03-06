@@ -466,14 +466,15 @@ class ChatAI:
         now_dt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         prompt = (
             f"当前时间（Asia/Shanghai）: {now_dt}\n"
-            "请从下面一小时内的对话中提取值得后续主动关怀的事项，输出 JSON。\n"
+            "请从下面一小时内的完整对话中提取值得后续主动关怀的事项，输出 JSON。\n"
             "仅输出 JSON："
             "{\"tasks\":[{\"remind_at\":\"YYYY-MM-DD HH:MM:SS\",\"task_content\":\"...\"}]}\n"
             "规则：\n"
             "1) 只提取确实有未来时间指向的事项。\n"
             "2) remind_at 必须是绝对时间 YYYY-MM-DD HH:MM:SS。\n"
             "3) task_content 简洁自然，保留原因和事项（如有）。\n"
-            "4) 最多输出 5 条；不确定就不输出。\n\n"
+            "4) user 与 model 消息都可用于理解上下文，但只围绕用户真实需求提取。\n"
+            "5) 最多输出 5 条；不确定就不输出。\n\n"
             f"对话内容：\n{conversation_text}"
         )
         try:
@@ -515,8 +516,7 @@ class ChatAI:
         recent_msgs = self.db.get_chat_history_between(
             self.character_id,
             start_time=start,
-            end_time=now,
-            role='user'
+            end_time=now
         )
         if not recent_msgs:
             return
@@ -528,7 +528,8 @@ class ChatAI:
                 continue
             ts = msg.get('timestamp')
             ts_text = ts.strftime('%Y-%m-%d %H:%M:%S') if ts else 'unknown'
-            lines.append(f"[{ts_text}] user: {content}")
+            role = msg.get('role') or 'unknown'
+            lines.append(f"[{ts_text}] {role}: {content}")
         if not lines:
             return
 
