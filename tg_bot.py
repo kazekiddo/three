@@ -411,11 +411,17 @@ class ChatAI:
 
     def _run_web_search_context(self, query: str) -> str:
         """B-1 编排：单独调用一次 Google Search grounding，再把结果注入当前轮上下文"""
+        now_dt = datetime.datetime.now()
+        current_time_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        current_date_str = now_dt.strftime("%Y-%m-%d")
         prompt = (
             "请基于 Google Search 的结果，给出简洁事实摘要。\n"
             "要求：\n"
             "1) 用中文回答；2) 只保留与用户问题直接相关的事实；\n"
-            "3) 如果信息可能过时/冲突，要明确提示；4) 不要虚构来源。\n\n"
+            "3) 如果信息可能过时/冲突，要明确提示；4) 不要虚构来源；\n"
+            "5) 你必须严格区分“今天数据”和“最新可得数据”。\n"
+            f"6) 当前系统时间（Asia/Shanghai）是 {current_time_str}，今天日期是 {current_date_str}。\n"
+            "7) 只有当来源数据日期等于今天日期时，才能写“今天”；否则必须写“最新可得日期是 XXXX-XX-XX（非今日）”。\n\n"
             f"用户问题：{query}"
         )
         response = self.client.models.generate_content(
