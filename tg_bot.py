@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+import json
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -332,7 +333,13 @@ class ChatAI:
                     return f"ERROR: 提醒时间无法识别（{remind_at_str}），请给出更明确的时间。"
                 
                 # 存入数据库
-                self.db.add_reminder(self.character_id, ALLOWED_USER_ID, content, remind_at) 
+                self.db.add_reminder(
+                    self.character_id,
+                    ALLOWED_USER_ID,
+                    content,
+                    remind_at,
+                    source_type='user_request'
+                )
                 return f"SUCCESS: 我已经妥善记下了。我会在 {remind_at_str} 准时提醒你：{content}。"
             except Exception as e:
                 logger.error(f"注册提醒失败: {e}")
@@ -451,6 +458,112 @@ class ChatAI:
             source_lines = "\n".join([f"- {title}: {url}" for title, url in sources])
             return f"{summary}\n\n参考来源：\n{source_lines}"
         return summary
+
+    def _extract_proactive_care_tasks_from_conversation(self, conversation_text: str):
+        """从一段对话中批量提取后续可主动关怀的事项（每小时任务用）"""
+        if not conversation_text.strip():
+            return []
+        now_dt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        prompt = (
+            f"当前时间（Asia/Shanghai）: {now_dt}\n"
+            "请从下面一小时内的对话中提取值得后续主动关怀的事项，输出 JSON。\n"
+            "仅输出 JSON："
+            "{\"tasks\":[{\"remind_at\":\"YYYY-MM-DD HH:MM:SS\",\"task_content\":\"...\"}]}\n"
+            "规则：\n"
+            "1) 只提取确实有未来时间指向的事项。\n"
+            "2) remind_at 必须是绝对时间 YYYY-MM-DD HH:MM:SS。\n"
+            "3) task_content 简洁自然，保留原因和事项（如有）。\n"
+            "4) 最多输出 5 条；不确定就不输出。\n\n"
+            f"对话内容：\n{conversation_text}"
+        )
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type='application/json',
+                    temperature=0.0
+                )
+            )
+            raw_text = response.text.strip() if response and response.text else ""
+            if not raw_text:
+                return []
+            data = json.loads(raw_text)
+            tasks = data.get("tasks", []) if isinstance(data, dict) else []
+            if not isinstance(tasks, list):
+                return []
+            normalized = []
+            for task in tasks[:5]:
+                if not isinstance(task, dict):
+                    continue
+                remind_at_str = (task.get("remind_at") or "").strip()
+                task_content = (task.get("task_content") or "").strip()
+                if not remind_at_str or not task_content:
+                    continue
+                normalized.append((remind_at_str, task_content))
+            return normalized
+        except Exception as e:
+            logger.error(f"批量提取主动关怀任务失败: {e}")
+            return []
+
+    def schedule_contextual_care_from_recent_window(self, window_minutes=60):
+        """整点任务：扫描最近窗口对话并安排主动关怀提醒"""
+        if not self.character_id:
+            return
+        now = datetime.datetime.now()
+        start = now - datetime.timedelta(minutes=window_minutes)
+        recent_msgs = self.db.get_chat_history_between(
+            self.character_id,
+            start_time=start,
+            end_time=now,
+            role='user'
+        )
+        if not recent_msgs:
+            return
+
+        lines = []
+        for msg in recent_msgs:
+            content = (msg.get('content') or '').strip()
+            if not content:
+                continue
+            ts = msg.get('timestamp')
+            ts_text = ts.strftime('%Y-%m-%d %H:%M:%S') if ts else 'unknown'
+            lines.append(f"[{ts_text}] user: {content}")
+        if not lines:
+            return
+
+        tasks = self._extract_proactive_care_tasks_from_conversation("\n".join(lines))
+        for remind_at_str, task_content in tasks:
+            remind_at = None
+            for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+                try:
+                    remind_at = datetime.datetime.strptime(remind_at_str, fmt)
+                    break
+                except ValueError:
+                    continue
+            if not remind_at or remind_at <= now:
+                continue
+
+            window_start = remind_at - datetime.timedelta(hours=2)
+            window_end = remind_at + datetime.timedelta(hours=2)
+            if self.db.has_pending_similar_reminder(
+                character_id=self.character_id,
+                user_id=ALLOWED_USER_ID,
+                task_content=task_content,
+                start_time=window_start,
+                end_time=window_end
+            ):
+                continue
+            try:
+                self.db.add_reminder(
+                    self.character_id,
+                    ALLOWED_USER_ID,
+                    task_content,
+                    remind_at,
+                    source_type='hourly_auto_extract'
+                )
+            except Exception as e:
+                logger.error(f"整点自动安排情境关怀提醒失败: {e}")
             
     def clear_history(self):
         """每天凌晨清空一次内存中的长对话列表，同时保留工具能力"""
@@ -927,6 +1040,33 @@ async def trigger_consolidate(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"巩固任务执行失败: {str(e)}")
     asyncio.create_task(run_task())
 
+async def trigger_hourly_care_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /care_extract 命令，手动触发整点关怀提取逻辑"""
+    import asyncio
+    await update.message.reply_text("已触发整点关怀提取任务 (hourly_contextual_care)，正在后台执行...")
+
+    async def run_task():
+        try:
+            if not user_chats:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="当前没有活跃聊天实例，无需提取。")
+                return
+
+            processed = 0
+            for _, chat_ai in list(user_chats.items()):
+                try:
+                    chat_ai.schedule_contextual_care_from_recent_window(window_minutes=60)
+                    processed += 1
+                except Exception as e:
+                    logger.error(f"手动触发整点关怀提取失败(单实例): {e}")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"整点关怀提取任务执行完成，已处理 {processed} 个聊天实例。"
+            )
+        except Exception as e:
+            logger.error(f"手动触发整点关怀提取失败: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"整点关怀提取任务执行失败: {str(e)}")
+    asyncio.create_task(run_task())
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /help 命令，显示所有可用命令"""
     help_text = (
@@ -936,6 +1076,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/history - 查看与当前角色的最近 10 条历史记录\n"
         "/filter - 手动触发抽取情景记忆任务 (后台运行)\n"
         "/consolidate - 手动触发巩固核心人格任务 (后台运行)\n"
+        "/care_extract - 手动触发整点关怀提取任务 (后台运行)\n"
         "/help - 显示此帮助信息"
     )
     await update.message.reply_text(help_text, parse_mode='HTML')
@@ -1184,6 +1325,7 @@ def main():
     application.add_handler(CommandHandler("history", history))
     application.add_handler(CommandHandler("filter", trigger_filter))
     application.add_handler(CommandHandler("consolidate", trigger_consolidate))
+    application.add_handler(CommandHandler("care_extract", trigger_hourly_care_extract))
     application.add_handler(CommandHandler("help", help_command))
     # 更新过滤器，支持文字和图片（MESSAGE_TYPE.PHOTO）
     application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_message))
@@ -1223,6 +1365,19 @@ def main():
     # 之后每轮由 proactive_check_job 自身动态安排下次，间隔同样随机 10~25 分钟，保证无规律感
     import random
     job_queue.run_once(proactive_check_job, when=random.randint(600, 1500))
+
+    # 每小时整点执行一次：扫描最近一小时用户消息，自动提取后续可关怀事项并写入 reminders
+    async def hourly_contextual_care_job(context: ContextTypes.DEFAULT_TYPE):
+        for _, chat_ai in list(user_chats.items()):
+            try:
+                chat_ai.schedule_contextual_care_from_recent_window(window_minutes=60)
+            except Exception as e:
+                logger.error(f"hourly_contextual_care_job 失败: {e}")
+
+    now_dt = datetime.datetime.now()
+    next_hour_dt = (now_dt + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    first_run_seconds = (next_hour_dt - now_dt).total_seconds()
+    job_queue.run_repeating(hourly_contextual_care_job, interval=3600, first=first_run_seconds)
 
     # 注册提醒任务扫描：每分钟检查一次是否有到期的提醒
     job_queue.run_repeating(reminder_job, interval=60, first=10)

@@ -111,6 +111,33 @@ class Database:
             )
             return cur.fetchall()
 
+    def get_chat_history_between(self, character_id, start_time, end_time, role=None):
+        """获取指定时间窗内的对话记录"""
+        conn = self.connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if role:
+                cur.execute(
+                    """SELECT role, content, timestamp
+                       FROM chat_messages
+                       WHERE character_id = %s
+                         AND timestamp >= %s
+                         AND timestamp < %s
+                         AND role = %s
+                       ORDER BY timestamp ASC""",
+                    (character_id, start_time, end_time, role)
+                )
+            else:
+                cur.execute(
+                    """SELECT role, content, timestamp
+                       FROM chat_messages
+                       WHERE character_id = %s
+                         AND timestamp >= %s
+                         AND timestamp < %s
+                       ORDER BY timestamp ASC""",
+                    (character_id, start_time, end_time)
+                )
+            return cur.fetchall()
+
     # --- 记忆漏斗方法开始 ---
 
     def get_unextracted_messages(self, character_id, limit=5000):
@@ -651,15 +678,15 @@ class Database:
             conn.commit()
     # --- 提醒任务方法开始 ---
 
-    def add_reminder(self, character_id, user_id, task_content, remind_at):
+    def add_reminder(self, character_id, user_id, task_content, remind_at, source_type='user_request'):
         """保存提醒任务"""
         conn = self.connect()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO reminders (character_id, user_id, task_content, remind_at) 
-                       VALUES (%s, %s, %s, %s)""",
-                    (character_id, user_id, task_content, remind_at)
+                    """INSERT INTO reminders (character_id, user_id, task_content, remind_at, source_type) 
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (character_id, user_id, task_content, remind_at, source_type)
                 )
                 conn.commit()
         except Exception as e:
@@ -687,4 +714,26 @@ class Database:
                 (reminder_id,)
             )
             conn.commit()
+
+    def has_pending_similar_reminder(self, character_id, user_id, task_content, start_time, end_time):
+        """判断时间窗口内是否已有相似待发送提醒（避免重复触发）"""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            if not start_time or not end_time:
+                return False
+            content = (task_content or "").strip()
+            if not content:
+                return False
+            cur.execute(
+                """SELECT 1
+                   FROM reminders
+                   WHERE character_id = %s
+                     AND user_id = %s
+                     AND status = 'pending'
+                     AND remind_at BETWEEN %s AND %s
+                     AND task_content = %s
+                   LIMIT 1""",
+                (character_id, user_id, start_time, end_time, content)
+            )
+            return cur.fetchone() is not None
     # --- 提醒任务方法结束 ---
