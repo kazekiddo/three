@@ -1433,18 +1433,8 @@ def main():
     import random
     job_queue.run_once(proactive_check_job, when=random.randint(600, 1500))
 
-    # 每小时整点执行一次：扫描最近一小时用户消息，自动提取后续可关怀事项并写入 reminders
-    async def hourly_contextual_care_job(context: ContextTypes.DEFAULT_TYPE):
-        for _, chat_ai in list(user_chats.items()):
-            try:
-                chat_ai.schedule_contextual_care_from_recent_window(window_minutes=60)
-            except Exception as e:
-                logger.error(f"hourly_contextual_care_job 失败: {e}")
-
-    now_dt = datetime.datetime.now()
-    next_hour_dt = (now_dt + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
-    first_run_seconds = (next_hour_dt - now_dt).total_seconds()
-    job_queue.run_repeating(hourly_contextual_care_job, interval=3600, first=first_run_seconds)
+    # 已关闭“每小时整点自动提取关怀事项”定时任务。
+    # 如需执行，可使用 /care_extract 手动触发。
 
     # 注册提醒任务扫描：每分钟检查一次是否有到期的提醒
     job_queue.run_repeating(reminder_job, interval=60, first=10)
