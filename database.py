@@ -117,7 +117,7 @@ class Database:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if role:
                 cur.execute(
-                    """SELECT role, content, timestamp
+                    """SELECT role, content, context_prefix, timestamp
                        FROM chat_messages
                        WHERE character_id = %s
                          AND timestamp >= %s
@@ -128,7 +128,7 @@ class Database:
                 )
             else:
                 cur.execute(
-                    """SELECT role, content, timestamp
+                    """SELECT role, content, context_prefix, timestamp
                        FROM chat_messages
                        WHERE character_id = %s
                          AND timestamp >= %s

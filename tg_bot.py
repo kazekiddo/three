@@ -466,17 +466,17 @@ class ChatAI:
         now_dt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         prompt = (
             f"当前时间（Asia/Shanghai）: {now_dt}\n"
-            "请从下面一小时内的用户消息中提取值得后续主动关怀的事项，输出 JSON。\n"
+            "请从下面一小时内的完整对话中提取值得后续主动关怀的事项，输出 JSON。\n"
             "仅输出 JSON："
             "{\"tasks\":[{\"event_at\":\"YYYY-MM-DD HH:MM:SS\",\"remind_at\":\"YYYY-MM-DD HH:MM:SS\",\"task_content\":\"...\"}]}\n"
             "规则：\n"
-            "1) 只根据用户消息提取，不能把 model 的诉求、抱怨或撒娇内容当作提醒事项。\n"
+            "1) user 与 model 消息都可用于理解上下文，但提醒事项必须围绕用户真实需求，不要把纯角色撒娇当作任务。\n"
             "2) tasks 中每条都必须给 event_at 和 remind_at，且都是绝对时间 YYYY-MM-DD HH:MM:SS。\n"
             "3) remind_at 必须早于 event_at，目的是让用户提前准备；不能在事件发生后提醒。\n"
             "4) 若用户只说“明天”没具体时刻，可先合理推断 event_at（如明天中午或下午），但 remind_at 仍必须在其之前。\n"
             "5) task_content 要写成可执行提醒，不要写“询问是否需要建议”这类二次确认句。\n"
             "6) 最多输出 5 条；不确定就不输出。\n\n"
-            f"用户消息：\n{conversation_text}"
+            f"对话内容：\n{conversation_text}"
         )
         try:
             response = self.client.models.generate_content(
@@ -526,14 +526,15 @@ class ChatAI:
 
         lines = []
         for msg in recent_msgs:
-            if (msg.get('role') or '') != 'user':
-                continue
             content = (msg.get('content') or '').strip()
             if not content:
                 continue
-            ts = msg.get('timestamp')
-            ts_text = ts.strftime('%Y-%m-%d %H:%M:%S') if ts else 'unknown'
-            lines.append(f"[{ts_text}] user: {content}")
+            role = msg.get('role') or 'unknown'
+            prefix = (msg.get('context_prefix') or '').strip()
+            if prefix:
+                lines.append(f"{prefix} {role}: {content}")
+            else:
+                lines.append(f"{role}: {content}")
         if not lines:
             return
 
