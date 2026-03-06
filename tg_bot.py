@@ -468,13 +468,14 @@ class ChatAI:
             f"当前时间（Asia/Shanghai）: {now_dt}\n"
             "请从下面一小时内的用户消息中提取值得后续主动关怀的事项，输出 JSON。\n"
             "仅输出 JSON："
-            "{\"tasks\":[{\"remind_at\":\"YYYY-MM-DD HH:MM:SS\",\"task_content\":\"...\"}]}\n"
+            "{\"tasks\":[{\"event_at\":\"YYYY-MM-DD HH:MM:SS\",\"remind_at\":\"YYYY-MM-DD HH:MM:SS\",\"task_content\":\"...\"}]}\n"
             "规则：\n"
             "1) 只根据用户消息提取，不能把 model 的诉求、抱怨或撒娇内容当作提醒事项。\n"
-            "2) tasks 中每条都必须给绝对时间 remind_at（YYYY-MM-DD HH:MM:SS）。\n"
-            "3) 如果是潜在关怀线索且用户未给具体时间，你可以根据语境合理给出一个未来时间（不要过于遥远）。\n"
-            "4) task_content 简洁自然，保留原因和事项（如有）。\n"
-            "5) 最多输出 5 条；不确定就不输出。\n\n"
+            "2) tasks 中每条都必须给 event_at 和 remind_at，且都是绝对时间 YYYY-MM-DD HH:MM:SS。\n"
+            "3) remind_at 必须早于 event_at，目的是让用户提前准备；不能在事件发生后提醒。\n"
+            "4) 若用户只说“明天”没具体时刻，可先合理推断 event_at（如明天中午或下午），但 remind_at 仍必须在其之前。\n"
+            "5) task_content 要写成可执行提醒，不要写“询问是否需要建议”这类二次确认句。\n"
+            "6) 最多输出 5 条；不确定就不输出。\n\n"
             f"用户消息：\n{conversation_text}"
         )
         try:
@@ -498,11 +499,12 @@ class ChatAI:
                 for task in tasks[:5]:
                     if not isinstance(task, dict):
                         continue
+                    event_at_str = (task.get("event_at") or "").strip()
                     remind_at_str = (task.get("remind_at") or "").strip()
                     task_content = (task.get("task_content") or "").strip()
-                    if not remind_at_str or not task_content:
+                    if not event_at_str or not remind_at_str or not task_content:
                         continue
-                    normalized.append((remind_at_str, task_content))
+                    normalized.append((event_at_str, remind_at_str, task_content))
             return normalized
         except Exception as e:
             logger.error(f"批量提取主动关怀任务失败: {e}")
@@ -536,7 +538,14 @@ class ChatAI:
             return
 
         tasks = self._extract_proactive_care_tasks_from_conversation("\n".join(lines))
-        for remind_at_str, task_content in tasks:
+        for event_at_str, remind_at_str, task_content in tasks:
+            event_at = None
+            for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+                try:
+                    event_at = datetime.datetime.strptime(event_at_str, fmt)
+                    break
+                except ValueError:
+                    continue
             remind_at = None
             for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
                 try:
@@ -546,6 +555,8 @@ class ChatAI:
                     continue
 
             if not remind_at or remind_at <= now:
+                continue
+            if not event_at or remind_at >= event_at:
                 continue
 
             window_start = remind_at - datetime.timedelta(hours=2)
