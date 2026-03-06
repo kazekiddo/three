@@ -136,6 +136,7 @@ class ChatAI:
         self.last_message_timestamp = None
         self.last_user_message_timestamp = None  # 只在用户发消息时更新，供主动发言的 30 分钟门槛使用
         self.last_prefix_timestamp = None
+        self.enable_web_search = os.getenv("ENABLE_WEB_SEARCH", "true").lower() in ("1", "true", "yes", "on")
         
         # 预加载角色设定图和用户（思远）设定图 (用于视觉一致性)
         self.character_photo_path = "/data/three/media/photos/photo_nanase.jpg"
@@ -361,6 +362,80 @@ class ChatAI:
             config=config,
             history=history
         )
+
+    def _should_use_web_search(self, message: str) -> bool:
+        """严格模式：仅在用户明确说“上网”时触发联网搜索"""
+        if not self.enable_web_search or not message:
+            return False
+        text = message.strip().lower()
+        if not text:
+            return False
+        return "上网" in text
+
+    @staticmethod
+    def _extract_response_text(response) -> str:
+        text = ""
+        try:
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if getattr(part, "text", None):
+                        text += part.text
+        except Exception:
+            pass
+        return text.strip()
+
+    @staticmethod
+    def _extract_grounding_sources(response, limit=6):
+        """从 grounding metadata 提取来源链接"""
+        sources = []
+        seen = set()
+        try:
+            response_dict = response.model_dump(exclude_none=True) if hasattr(response, "model_dump") else {}
+            candidates = response_dict.get("candidates", [])
+            for cand in candidates:
+                gm = cand.get("grounding_metadata") or cand.get("groundingMetadata") or {}
+                chunks = gm.get("grounding_chunks") or gm.get("groundingChunks") or []
+                for chunk in chunks:
+                    web_info = chunk.get("web") or {}
+                    url = web_info.get("uri") or web_info.get("url")
+                    title = web_info.get("title") or url
+                    if not url or url in seen:
+                        continue
+                    seen.add(url)
+                    sources.append((title, url))
+                    if len(sources) >= limit:
+                        return sources
+        except Exception:
+            return sources
+        return sources
+
+    def _run_web_search_context(self, query: str) -> str:
+        """B-1 编排：单独调用一次 Google Search grounding，再把结果注入当前轮上下文"""
+        prompt = (
+            "请基于 Google Search 的结果，给出简洁事实摘要。\n"
+            "要求：\n"
+            "1) 用中文回答；2) 只保留与用户问题直接相关的事实；\n"
+            "3) 如果信息可能过时/冲突，要明确提示；4) 不要虚构来源。\n\n"
+            f"用户问题：{query}"
+        )
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
+        )
+
+        summary = self._extract_response_text(response)
+        if not summary:
+            return ""
+
+        sources = self._extract_grounding_sources(response, limit=6)
+        if sources:
+            source_lines = "\n".join([f"- {title}: {url}" for title, url in sources])
+            return f"{summary}\n\n参考来源：\n{source_lines}"
+        return summary
             
     def clear_history(self):
         """每天凌晨清空一次内存中的长对话列表，同时保留工具能力"""
@@ -472,6 +547,19 @@ class ChatAI:
             augmented_message += core_facts_text
         if episodic_text:
             augmented_message += episodic_text
+
+        # B-1：按需联网搜索（独立请求），再把摘要注入当前轮上下文
+        web_search_text = ""
+        if self._should_use_web_search(message):
+            try:
+                web_search_text = self._run_web_search_context(message)
+            except Exception as e:
+                logger.error(f"联网搜索失败: {e}")
+        if web_search_text:
+            augmented_message += (
+                "\n\n[系统附加联网信息：以下是本轮联网检索摘要，请优先使用有来源的事实作答]\n"
+                f"{web_search_text}"
+            )
 
         # 重置待处理图片
         self.pending_output_image = None
