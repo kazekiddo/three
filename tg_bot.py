@@ -468,13 +468,14 @@ class ChatAI:
             f"当前时间（Asia/Shanghai）: {now_dt}\n"
             "请从下面一小时内的完整对话中提取值得后续主动关怀的事项，输出 JSON。\n"
             "仅输出 JSON："
-            "{\"tasks\":[{\"remind_at\":\"YYYY-MM-DD HH:MM:SS\",\"task_content\":\"...\"}]}\n"
+            "{\"tasks\":[{\"remind_at\":\"YYYY-MM-DD HH:MM:SS\",\"task_content\":\"...\"}],\"followups\":[{\"topic\":\"...\",\"care_content\":\"...\",\"suggest_window\":\"today_evening|within_24h|tomorrow_morning\"}]}\n"
             "规则：\n"
-            "1) 只提取确实有未来时间指向的事项。\n"
-            "2) remind_at 必须是绝对时间 YYYY-MM-DD HH:MM:SS。\n"
-            "3) task_content 简洁自然，保留原因和事项（如有）。\n"
+            "1) tasks 只放有明确未来时间证据的事项，remind_at 必须是绝对时间 YYYY-MM-DD HH:MM:SS。\n"
+            "2) 对没有明确时间但值得关怀的线索（如设备故障、情绪压力、健康状态、承诺兑现等），放入 followups。\n"
+            "3) followups 不要编造具体时刻，只给 suggest_window（today_evening / within_24h / tomorrow_morning）。\n"
             "4) user 与 model 消息都可用于理解上下文，但只围绕用户真实需求提取。\n"
-            "5) 最多输出 5 条；不确定就不输出。\n\n"
+            "5) task_content/care_content 简洁自然，保留原因和事项（如有）。\n"
+            "6) 每个数组最多 5 条；不确定就不输出。\n\n"
             f"对话内容：\n{conversation_text}"
         )
         try:
@@ -490,22 +491,54 @@ class ChatAI:
             if not raw_text:
                 return []
             data = json.loads(raw_text)
-            tasks = data.get("tasks", []) if isinstance(data, dict) else []
-            if not isinstance(tasks, list):
+            if not isinstance(data, dict):
                 return []
+            tasks = data.get("tasks", [])
+            followups = data.get("followups", [])
             normalized = []
-            for task in tasks[:5]:
-                if not isinstance(task, dict):
-                    continue
-                remind_at_str = (task.get("remind_at") or "").strip()
-                task_content = (task.get("task_content") or "").strip()
-                if not remind_at_str or not task_content:
-                    continue
-                normalized.append((remind_at_str, task_content))
+            if isinstance(tasks, list):
+                for task in tasks[:5]:
+                    if not isinstance(task, dict):
+                        continue
+                    remind_at_str = (task.get("remind_at") or "").strip()
+                    task_content = (task.get("task_content") or "").strip()
+                    if not remind_at_str or not task_content:
+                        continue
+                    normalized.append({
+                        "kind": "task",
+                        "remind_at_str": remind_at_str,
+                        "task_content": task_content
+                    })
+            if isinstance(followups, list):
+                for item in followups[:5]:
+                    if not isinstance(item, dict):
+                        continue
+                    care_content = (item.get("care_content") or "").strip()
+                    suggest_window = (item.get("suggest_window") or "").strip()
+                    if not care_content or suggest_window not in ("today_evening", "within_24h", "tomorrow_morning"):
+                        continue
+                    normalized.append({
+                        "kind": "followup",
+                        "suggest_window": suggest_window,
+                        "task_content": care_content
+                    })
             return normalized
         except Exception as e:
             logger.error(f"批量提取主动关怀任务失败: {e}")
             return []
+
+    @staticmethod
+    def _resolve_followup_remind_at(suggest_window: str, now: datetime.datetime):
+        if suggest_window == "today_evening":
+            target = now.replace(hour=21, minute=30, second=0, microsecond=0)
+            if target <= now:
+                target = (now + datetime.timedelta(days=1)).replace(hour=21, minute=30, second=0, microsecond=0)
+            return target
+        if suggest_window == "tomorrow_morning":
+            return (now + datetime.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+        if suggest_window == "within_24h":
+            return now + datetime.timedelta(hours=4)
+        return None
 
     def schedule_contextual_care_from_recent_window(self, window_minutes=60):
         """整点任务：扫描最近窗口对话并安排主动关怀提醒"""
@@ -534,14 +567,23 @@ class ChatAI:
             return
 
         tasks = self._extract_proactive_care_tasks_from_conversation("\n".join(lines))
-        for remind_at_str, task_content in tasks:
+        for task in tasks:
+            task_content = (task.get("task_content") or "").strip()
+            if not task_content:
+                continue
+
             remind_at = None
-            for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
-                try:
-                    remind_at = datetime.datetime.strptime(remind_at_str, fmt)
-                    break
-                except ValueError:
-                    continue
+            if task.get("kind") == "task":
+                remind_at_str = (task.get("remind_at_str") or "").strip()
+                for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+                    try:
+                        remind_at = datetime.datetime.strptime(remind_at_str, fmt)
+                        break
+                    except ValueError:
+                        continue
+            elif task.get("kind") == "followup":
+                remind_at = self._resolve_followup_remind_at(task.get("suggest_window"), now)
+
             if not remind_at or remind_at <= now:
                 continue
 
@@ -1044,7 +1086,18 @@ async def trigger_consolidate(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def trigger_hourly_care_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /care_extract 命令，手动触发整点关怀提取逻辑"""
     import asyncio
-    await update.message.reply_text("已触发整点关怀提取任务 (hourly_contextual_care)，正在后台执行...")
+    hours = 1.0
+    if context.args:
+        try:
+            hours = float(context.args[0])
+            if hours <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("参数格式错误，请使用正数小时，例如：/care_extract 2 或 /care_extract 1.5")
+            return
+    window_minutes = hours * 60
+
+    await update.message.reply_text(f"已触发整点关怀提取任务 (hourly_contextual_care)，窗口最近 {hours:g} 小时，正在后台执行...")
 
     async def run_task():
         try:
@@ -1055,13 +1108,13 @@ async def trigger_hourly_care_extract(update: Update, context: ContextTypes.DEFA
             processed = 0
             for _, chat_ai in list(user_chats.items()):
                 try:
-                    chat_ai.schedule_contextual_care_from_recent_window(window_minutes=60)
+                    chat_ai.schedule_contextual_care_from_recent_window(window_minutes=window_minutes)
                     processed += 1
                 except Exception as e:
                     logger.error(f"手动触发整点关怀提取失败(单实例): {e}")
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text=f"整点关怀提取任务执行完成，已处理 {processed} 个聊天实例。"
+                text=f"整点关怀提取任务执行完成（最近 {hours:g} 小时），已处理 {processed} 个聊天实例。"
             )
         except Exception as e:
             logger.error(f"手动触发整点关怀提取失败: {e}")
@@ -1077,7 +1130,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/history - 查看与当前角色的最近 10 条历史记录\n"
         "/filter - 手动触发抽取情景记忆任务 (后台运行)\n"
         "/consolidate - 手动触发巩固核心人格任务 (后台运行)\n"
-        "/care_extract - 手动触发整点关怀提取任务 (后台运行)\n"
+        "/care_extract [小时] - 手动触发整点关怀提取任务，默认最近 1 小时 (后台运行)\n"
         "/help - 显示此帮助信息"
     )
     await update.message.reply_text(help_text, parse_mode='HTML')
