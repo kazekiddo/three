@@ -1183,7 +1183,7 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
     db = Database()
     try:
         due_reminders = db.get_due_reminders()
-        for rem in due_reminders:
+        for idx, rem in enumerate(due_reminders):
             uid = int(rem['user_id'])
             chat_ai = user_chats.get(uid)
             if not chat_ai:
@@ -1216,6 +1216,10 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
             
             # 标记为已发送
             db.mark_reminder_sent(rem['id'])
+
+            # 避免连续触发导致速率限制：两条提醒之间间隔 10 秒
+            if idx < len(due_reminders) - 1:
+                await asyncio.sleep(10)
     except Exception as e:
         logger.error(f"reminder_job 出错: {e}")
     finally:
