@@ -138,6 +138,9 @@ class ChatAI:
         self.last_user_message_timestamp = None  # 只在用户发消息时更新，供主动发言的 30 分钟门槛使用
         self.last_prefix_timestamp = None
         self.enable_web_search = os.getenv("ENABLE_WEB_SEARCH", "true").lower() in ("1", "true", "yes", "on")
+        self.proactive_streak_count = 0
+        self.proactive_streak_date = None
+        self.proactive_blocked_date = None
         
         # 预加载角色设定图和用户（思远）设定图 (用于视觉一致性)
         self.character_photo_path = "/data/three/media/photos/photo_nanase.jpg"
@@ -378,6 +381,28 @@ class ChatAI:
             config=config,
             history=history
         )
+
+    def _ensure_proactive_day_state(self, now_dt: datetime.datetime):
+        today = now_dt.date()
+        if self.proactive_streak_date != today:
+            self.proactive_streak_date = today
+            self.proactive_streak_count = 0
+            self.proactive_blocked_date = None
+
+    def can_send_proactive_today(self, now_dt: datetime.datetime) -> bool:
+        self._ensure_proactive_day_state(now_dt)
+        return self.proactive_blocked_date != now_dt.date()
+
+    def on_user_replied(self, now_dt: datetime.datetime):
+        self._ensure_proactive_day_state(now_dt)
+        self.proactive_streak_count = 0
+        self.proactive_blocked_date = None
+
+    def on_proactive_sent(self, now_dt: datetime.datetime):
+        self._ensure_proactive_day_state(now_dt)
+        self.proactive_streak_count += 1
+        if self.proactive_streak_count >= 5:
+            self.proactive_blocked_date = now_dt.date()
 
     def _should_use_web_search(self, message: str) -> bool:
         """严格模式：仅在用户明确说“上网”时触发联网搜索"""
@@ -632,6 +657,8 @@ class ChatAI:
                 media_path=media_path,
                 media_type=image_mime_type
             )
+            # 用户回复后，解除“当天连续主动 5 条”限制并重置计数
+            self.on_user_replied(now_dt)
         
         # 向量检索核心记忆 + 情景记忆
         core_facts_text = ""
@@ -1250,6 +1277,9 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
 
         for user_id, chat_ai in list(user_chats.items()):
             try:
+                if not chat_ai.can_send_proactive_today(now_dt):
+                    continue
+
                 # 用用户最后说话时间计算沉默时长，AI 主动发言不重置这个门槛
                 last_user_ts = chat_ai.last_user_message_timestamp
                 user_silence_seconds = (now_dt - last_user_ts).total_seconds() if last_user_ts else 86400
@@ -1274,8 +1304,10 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                     continue
 
                 # 发送图片（如有）
+                sent_any = False
                 if image_path and os.path.exists(image_path):
                     await context.bot.send_photo(chat_id=user_id, photo=open(image_path, 'rb'))
+                    sent_any = True
 
                 # 分段发送文字，模拟真实打字速度（120 字/分钟），与 handle_message 保持一致
                 if response_text.strip():
@@ -1298,6 +1330,10 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                             await asyncio.sleep(delay)
                             typing_task.cancel()
                             await context.bot.send_message(chat_id=user_id, text=line.strip())
+                            sent_any = True
+
+                if sent_any:
+                    chat_ai.on_proactive_sent(now_dt)
 
             except Exception as e:
                 logger.error(f"主动消息处理出错 (user={user_id}): {e}")
