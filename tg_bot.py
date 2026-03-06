@@ -468,14 +468,13 @@ class ChatAI:
             f"当前时间（Asia/Shanghai）: {now_dt}\n"
             "请从下面一小时内的用户消息中提取值得后续主动关怀的事项，输出 JSON。\n"
             "仅输出 JSON："
-            "{\"tasks\":[{\"remind_at\":\"YYYY-MM-DD HH:MM:SS\",\"task_content\":\"...\"}],\"followups\":[{\"topic\":\"...\",\"care_content\":\"...\",\"suggest_window\":\"today_evening|within_24h|tomorrow_morning\"}]}\n"
+            "{\"tasks\":[{\"remind_at\":\"YYYY-MM-DD HH:MM:SS\",\"task_content\":\"...\"}]}\n"
             "规则：\n"
-            "1) tasks 只放有明确未来时间证据的事项，remind_at 必须是绝对时间 YYYY-MM-DD HH:MM:SS。\n"
-            "2) 对没有明确时间但值得关怀的线索（如设备故障、情绪压力、健康状态、承诺兑现等），放入 followups。\n"
-            "3) followups 不要编造具体时刻，只给 suggest_window（today_evening / within_24h / tomorrow_morning）。\n"
-            "4) 只根据用户消息提取，不能把 model 的诉求、抱怨或撒娇内容当作提醒事项。\n"
-            "5) task_content/care_content 简洁自然，保留原因和事项（如有）。\n"
-            "6) 每个数组最多 5 条；不确定就不输出。\n\n"
+            "1) 只根据用户消息提取，不能把 model 的诉求、抱怨或撒娇内容当作提醒事项。\n"
+            "2) tasks 中每条都必须给绝对时间 remind_at（YYYY-MM-DD HH:MM:SS）。\n"
+            "3) 如果是潜在关怀线索且用户未给具体时间，你可以根据语境合理给出一个未来时间（不要过于遥远）。\n"
+            "4) task_content 简洁自然，保留原因和事项（如有）。\n"
+            "5) 最多输出 5 条；不确定就不输出。\n\n"
             f"用户消息：\n{conversation_text}"
         )
         try:
@@ -494,7 +493,6 @@ class ChatAI:
             if not isinstance(data, dict):
                 return []
             tasks = data.get("tasks", [])
-            followups = data.get("followups", [])
             normalized = []
             if isinstance(tasks, list):
                 for task in tasks[:5]:
@@ -504,41 +502,11 @@ class ChatAI:
                     task_content = (task.get("task_content") or "").strip()
                     if not remind_at_str or not task_content:
                         continue
-                    normalized.append({
-                        "kind": "task",
-                        "remind_at_str": remind_at_str,
-                        "task_content": task_content
-                    })
-            if isinstance(followups, list):
-                for item in followups[:5]:
-                    if not isinstance(item, dict):
-                        continue
-                    care_content = (item.get("care_content") or "").strip()
-                    suggest_window = (item.get("suggest_window") or "").strip()
-                    if not care_content or suggest_window not in ("today_evening", "within_24h", "tomorrow_morning"):
-                        continue
-                    normalized.append({
-                        "kind": "followup",
-                        "suggest_window": suggest_window,
-                        "task_content": care_content
-                    })
+                    normalized.append((remind_at_str, task_content))
             return normalized
         except Exception as e:
             logger.error(f"批量提取主动关怀任务失败: {e}")
             return []
-
-    @staticmethod
-    def _resolve_followup_remind_at(suggest_window: str, now: datetime.datetime):
-        if suggest_window == "today_evening":
-            target = now.replace(hour=21, minute=30, second=0, microsecond=0)
-            if target <= now:
-                target = (now + datetime.timedelta(days=1)).replace(hour=21, minute=30, second=0, microsecond=0)
-            return target
-        if suggest_window == "tomorrow_morning":
-            return (now + datetime.timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
-        if suggest_window == "within_24h":
-            return now + datetime.timedelta(hours=4)
-        return None
 
     def schedule_contextual_care_from_recent_window(self, window_minutes=60):
         """整点任务：扫描最近窗口对话并安排主动关怀提醒"""
@@ -568,22 +536,14 @@ class ChatAI:
             return
 
         tasks = self._extract_proactive_care_tasks_from_conversation("\n".join(lines))
-        for task in tasks:
-            task_content = (task.get("task_content") or "").strip()
-            if not task_content:
-                continue
-
+        for remind_at_str, task_content in tasks:
             remind_at = None
-            if task.get("kind") == "task":
-                remind_at_str = (task.get("remind_at_str") or "").strip()
-                for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
-                    try:
-                        remind_at = datetime.datetime.strptime(remind_at_str, fmt)
-                        break
-                    except ValueError:
-                        continue
-            elif task.get("kind") == "followup":
-                remind_at = self._resolve_followup_remind_at(task.get("suggest_window"), now)
+            for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
+                try:
+                    remind_at = datetime.datetime.strptime(remind_at_str, fmt)
+                    break
+                except ValueError:
+                    continue
 
             if not remind_at or remind_at <= now:
                 continue
