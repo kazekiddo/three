@@ -466,7 +466,7 @@ class ChatAI:
         now_dt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         prompt = (
             f"当前时间（Asia/Shanghai）: {now_dt}\n"
-            "请从下面一小时内的完整对话中提取值得后续主动关怀的事项，输出 JSON。\n"
+            "请从下面完整对话中提取值得后续主动关怀的事项，输出 JSON。\n"
             "仅输出 JSON："
             "{\"tasks\":[{\"event_at\":\"YYYY-MM-DD HH:MM:SS\",\"remind_at\":\"YYYY-MM-DD HH:MM:SS\",\"task_content\":\"...\"}]}\n"
             "规则：\n"
