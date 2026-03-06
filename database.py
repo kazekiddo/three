@@ -127,6 +127,40 @@ class Database:
             )
             return cur.fetchall()
 
+    def get_oldest_unextracted_timestamp(self, character_id):
+        """获取最早一条未提取消息的时间戳"""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT timestamp
+                   FROM chat_messages
+                   WHERE character_id = %s
+                     AND is_extracted = false
+                   ORDER BY timestamp ASC, id ASC
+                   LIMIT 1""",
+                (character_id,)
+            )
+            res = cur.fetchone()
+            return res[0] if res else None
+
+    def get_unextracted_messages_in_window(self, character_id, start_time, end_time, last_id=0, limit=1000):
+        """分页获取指定时间窗口内、未提取的消息"""
+        conn = self.connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT id, character_id, role, content, context_prefix, timestamp
+                   FROM chat_messages
+                   WHERE character_id = %s
+                     AND is_extracted = false
+                     AND timestamp >= %s
+                     AND timestamp < %s
+                     AND id > %s
+                   ORDER BY id ASC
+                   LIMIT %s""",
+                (character_id, start_time, end_time, last_id, limit)
+            )
+            return cur.fetchall()
+
     def mark_messages_extracted(self, message_ids):
         """将原始对话标记为已提取"""
         if not message_ids:

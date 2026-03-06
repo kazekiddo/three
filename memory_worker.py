@@ -2,7 +2,9 @@ import os
 import json
 import logging
 import asyncio
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from google import genai
 from pydantic import BaseModel
 from database import Database
@@ -20,11 +22,266 @@ class CoreFactMemory(BaseModel):
     stability_score: float
 
 class MemoryWorker:
+    BJT = ZoneInfo("Asia/Shanghai")
+    RELATIONAL_TARGETS = {
+        "closeness", "trust", "attraction", "dependency",
+        "respect", "resentment", "security", "jealousy"
+    }
+    RELATIONAL_INTENSITIES = {
+        "strong_positive", "positive", "neutral", "negative", "strong_negative"
+    }
+    CORE_FACT_CATEGORIES = {
+        "自我特质", "他者画像", "关系羁绊", "情感锚点"
+    }
+
     def __init__(self, api_key=None):
         if api_key is None:
             api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')
         self.client = genai.Client(api_key=api_key)
         self.db = Database()
+
+    @staticmethod
+    def _extract_json_text(raw_text):
+        if not raw_text:
+            return ""
+        text = raw_text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        return text.strip()
+
+    @staticmethod
+    def _parse_event_time(value):
+        if not value:
+            return None
+        if not isinstance(value, str):
+            return None
+        candidate = value.strip()
+        if not candidate:
+            return None
+        candidate = candidate.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(candidate)
+        except Exception:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(candidate, fmt)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _clamp(value, low, high):
+        return max(low, min(high, value))
+
+    def _to_bjt(self, dt):
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=self.BJT)
+        return dt.astimezone(self.BJT)
+
+    def _cycle_start_bjt(self, dt):
+        bjt_dt = self._to_bjt(dt)
+        if bjt_dt.hour < 3:
+            start_date = (bjt_dt - timedelta(days=1)).date()
+        else:
+            start_date = bjt_dt.date()
+        return datetime(
+            start_date.year, start_date.month, start_date.day, 3, 0, 0, tzinfo=self.BJT
+        )
+
+    @staticmethod
+    def _to_naive(dt):
+        if dt is None:
+            return None
+        return dt.replace(tzinfo=None)
+
+    def _fetch_cycle_messages_paginated(self, character_id, cycle_start, cycle_end, batch_size=1000, max_messages=20000):
+        """分页拉取单个 03:00~次日03:00 周期内的未提纯消息"""
+        messages = []
+        last_id = 0
+        start_naive = self._to_naive(cycle_start)
+        end_naive = self._to_naive(cycle_end)
+
+        while True:
+            batch = self.db.get_unextracted_messages_in_window(
+                character_id=character_id,
+                start_time=start_naive,
+                end_time=end_naive,
+                last_id=last_id,
+                limit=batch_size
+            )
+            if not batch:
+                break
+
+            messages.extend(batch)
+            last_id = batch[-1]["id"]
+            if len(messages) >= max_messages:
+                logger.warning(
+                    f"角色 {character_id} 在周期 {cycle_start} 内未提纯消息超过 {max_messages} 条，已截断本轮处理"
+                )
+                break
+
+        return messages
+
+    def _normalize_filter_payload(self, data):
+        if not isinstance(data, dict):
+            return [], [], [], ""
+
+        memories = data.get("memories", [])
+        normalized_memories = []
+        if isinstance(memories, list):
+            for item in memories:
+                if not isinstance(item, dict):
+                    continue
+                content = (item.get("content") or "").strip()
+                if not content:
+                    continue
+                normalized_memories.append({
+                    "content": content,
+                    "emotion_intensity": float(self._clamp(float(item.get("emotion_intensity", 5.0)), 1.0, 10.0)),
+                    "promotion_candidate": bool(item.get("promotion_candidate", False)),
+                    "event_time": self._parse_event_time(item.get("event_time")),
+                    "causal_link_id": item.get("causal_link_id"),
+                    "emotion_category": (item.get("emotion_category") or "").strip() or None
+                })
+                if len(normalized_memories) >= 8:
+                    break
+
+        events = data.get("relational_events", [])
+        normalized_events = []
+        if isinstance(events, list):
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                target = str(event.get("target", "")).strip().lower()
+                intensity = str(event.get("intensity", "")).strip().lower()
+                if target in self.RELATIONAL_TARGETS and intensity in self.RELATIONAL_INTENSITIES:
+                    normalized_events.append({"target": target, "intensity": intensity})
+                if len(normalized_events) >= 3:
+                    break
+
+        shock_events = data.get("shock_events", [])
+        if not isinstance(shock_events, list):
+            shock_events = []
+
+        narrative = data.get("relationship_narrative")
+        narrative = narrative.strip() if isinstance(narrative, str) else None
+
+        return normalized_memories, normalized_events, shock_events, narrative
+
+    @staticmethod
+    def _is_similar_memory_text(text_a, text_b):
+        a = (text_a or "").strip()
+        b = (text_b or "").strip()
+        if not a or not b:
+            return False
+        if a in b or b in a:
+            return True
+        a_tokens = set(re.findall(r'[\u4e00-\u9fffA-Za-z0-9]{2,}', a))
+        b_tokens = set(re.findall(r'[\u4e00-\u9fffA-Za-z0-9]{2,}', b))
+        if not a_tokens or not b_tokens:
+            return False
+        overlap = len(a_tokens & b_tokens) / max(1, min(len(a_tokens), len(b_tokens)))
+        return overlap >= 0.7
+
+    def _extract_daily_task_memories(self, cycle_msgs):
+        """规则兜底：提取低情绪但重要的日常约定/待办，避免被 LLM 忽略。"""
+        if not cycle_msgs:
+            return []
+
+        task_patterns = [
+            re.compile(r'(记得|别忘|提醒|帮我|麻烦你|要不|要记得).{0,20}(买|带|拿|做|处理|安排|准备|去|订|缴|修)'),
+            re.compile(r'(明天|今晚|周末|下班|回家|路上).{0,20}(买|带|拿|做|处理|安排|准备|去|订|缴|修)'),
+            re.compile(r'买.{0,20}(零食|饮料|水果|菜|东西|药|礼物)')
+        ]
+
+        fallback_memories = []
+        for msg in cycle_msgs:
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            if len(content) > 180:
+                continue
+            if not any(p.search(content) for p in task_patterns):
+                continue
+
+            ts = msg.get("timestamp")
+            ts_text = ""
+            if ts:
+                bjt = self._to_bjt(ts)
+                ts_text = bjt.strftime("%Y年%m月%d日 %H:%M")
+
+            fallback_memories.append({
+                "content": f"{ts_text} 对话提到的日常事项：{content}".strip(),
+                "emotion_intensity": 3.0,
+                "promotion_candidate": True,
+                "event_time": self._parse_event_time(ts.isoformat()) if ts else None,
+                "causal_link_id": None,
+                "emotion_category": "daily_life"
+            })
+            if len(fallback_memories) >= 5:
+                break
+
+        return fallback_memories
+
+    def _merge_memories_with_fallback(self, llm_memories, fallback_memories, max_total=12):
+        merged = list(llm_memories or [])
+        for fb in fallback_memories or []:
+            duplicated = any(self._is_similar_memory_text(x.get("content"), fb.get("content")) for x in merged)
+            if duplicated:
+                continue
+            merged.append(fb)
+            if len(merged) >= max_total:
+                break
+        return merged
+
+    def _normalize_consolidate_items(self, data):
+        if not isinstance(data, list):
+            return []
+
+        normalized = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            action = str(item.get("action", "")).strip().lower()
+            if action not in {"new", "update", "contradict"}:
+                continue
+
+            existing_id = item.get("existing_id")
+            if action in {"update", "contradict"}:
+                if not isinstance(existing_id, int):
+                    continue
+            else:
+                existing_id = None
+
+            fact_text = (item.get("fact_text") or "").strip()
+            if action == "new" and not fact_text:
+                continue
+
+            category = (item.get("category") or "").strip()
+            if category not in self.CORE_FACT_CATEGORIES:
+                category = "关系羁绊"
+
+            try:
+                stability_score = float(item.get("stability_score", 0.5))
+            except Exception:
+                stability_score = 0.5
+            stability_score = float(self._clamp(stability_score, 0.0, 1.0))
+
+            evidence_span = (item.get("evidence_span") or "").strip()
+
+            normalized.append({
+                "action": action,
+                "existing_id": existing_id,
+                "fact_text": fact_text,
+                "category": category,
+                "stability_score": stability_score,
+                "evidence_span": evidence_span or "日常重复确认"
+            })
+        return normalized
 
     async def filter_task(self):
         """每日凌晨执行（如北京时间 3:00）：将未处理的消息提取为情景记忆"""
@@ -36,34 +293,50 @@ class MemoryWorker:
 
             for char in characters:
                 cid = char['id']
-                # 放宽每次提取的消息上限，由于积攒了一整天，记录可能会比较多
-                msgs = self.db.get_unextracted_messages(cid, limit=5000)
-                
-                if not msgs:
-                    continue
+                while True:
+                    oldest_ts = self.db.get_oldest_unextracted_timestamp(cid)
+                    if not oldest_ts:
+                        break
 
-                conversation = ""
-                for m in msgs:
-                    prefix = f"{m['context_prefix']} " if m.get('context_prefix') else ""
-                    conversation += f"{prefix}{m['role']}: {m['content']}\n"
-                
-                # 获取最近的事件用于因果链参考
-                recent_events = self.db.get_recent_episodic_ids(cid, limit=5)
-                recent_events_text = "\n".join([f"ID: {e['id']} | 内容: {e['content']}" for e in recent_events])
+                    cycle_start = self._cycle_start_bjt(oldest_ts)
+                    cycle_end = cycle_start + timedelta(days=1)
+                    cycle_msgs = self._fetch_cycle_messages_paginated(
+                        character_id=cid,
+                        cycle_start=cycle_start,
+                        cycle_end=cycle_end
+                    )
+                    if not cycle_msgs:
+                        break
 
-                # 获取当前心理基准（状态感知）
-                curr_state = self.db.get_relationship_state(cid)
-                state_text = "未知"
-                if curr_state:
-                    state_text = (
-                        f"当前阶段: {curr_state.get('stage')} | 依恋风格: {curr_state.get('attachment_style')}\n"
-                        f"分值: 亲密({curr_state.get('closeness', 0):.2f}), 信任({curr_state.get('trust', 0):.2f}), 吸引({curr_state.get('attraction', 0):.2f}), "
-                        f"依赖({curr_state.get('dependency', 0):.2f}), 尊重({curr_state.get('respect', 0):.2f}), 怨念({curr_state.get('resentment', 0):.2f}), "
-                        f"安全({curr_state.get('security', 0):.2f}), 嫉妒({curr_state.get('jealousy', 0):.2f})"
+                    conversation = ""
+                    for m in cycle_msgs:
+                        prefix = f"{m['context_prefix']} " if m.get('context_prefix') else ""
+                        conversation += f"{prefix}{m['role']}: {m['content']}\n"
+
+                    # 获取最近的事件用于因果链参考
+                    recent_events = self.db.get_recent_episodic_ids(cid, limit=5)
+                    recent_events_text = "\n".join([f"ID: {e['id']} | 内容: {e['content']}" for e in recent_events])
+
+                    # 获取当前心理基准（状态感知）
+                    curr_state = self.db.get_relationship_state(cid)
+                    state_text = "未知"
+                    if curr_state:
+                        state_text = (
+                            f"当前阶段: {curr_state.get('stage')} | 依恋风格: {curr_state.get('attachment_style')}\n"
+                            f"分值: 亲密({curr_state.get('closeness', 0):.2f}), 信任({curr_state.get('trust', 0):.2f}), 吸引({curr_state.get('attraction', 0):.2f}), "
+                            f"依赖({curr_state.get('dependency', 0):.2f}), 尊重({curr_state.get('respect', 0):.2f}), 怨念({curr_state.get('resentment', 0):.2f}), "
+                            f"安全({curr_state.get('security', 0):.2f}), 嫉妒({curr_state.get('jealousy', 0):.2f})"
+                        )
+
+                    cycle_range_text = (
+                        f"{cycle_start.strftime('%Y-%m-%d %H:%M:%S %z')} ~ "
+                        f"{cycle_end.strftime('%Y-%m-%d %H:%M:%S %z')} (北京时间)"
                     )
 
-                prompt = (
+                    prompt = (
                     "你是角色的【内心旁白系统】，负责记录她对关系的真实感受变化。请根据当前状态和最新对话，推断她的情绪起伏、关系影响和记忆碎片。\n\n"
+                    f"【本次分析周期（严格）】\n{cycle_range_text}\n"
+                    "注意：你只能总结这个周期内发生的事件，不能混入周期外的信息。\n\n"
                     f"【目前她的内心基准】\n{state_text}\n\n"
                     "请遵循以下“内心运行规则”进行分析：\n"
                     "1. **叙事与偏移对齐 (Consistency)**：\n"
@@ -76,79 +349,77 @@ class MemoryWorker:
                     "   - 单次分析最多影响 2-3 个维度。targets 选自 [closeness, trust, attraction, dependency, respect, resentment, security, jealousy]。\n"
                     "   - intensities 选自 [strong_positive, positive, neutral, negative, strong_negative]。\n"
                     "5. **时间衰减与冲击**：怨念随和解淡化。shock_events 仅限重大转折（正式表白/分手/严重背叛）。\n\n"
+                    "6. **日常事务保留规则（非常重要）**：\n"
+                    "   - 即便情绪波动很小，也必须记录具有后续影响的日常事项，例如：要买零食、要带东西、约定明天做某事、答应提醒、临时计划变更。\n"
+                    "   - 这类事项会影响后续对话连续性，至少提取 1 条 relevant memory（如果本周期确有此类内容）。\n\n"
                     f"【最近内心碎片】\n{recent_events_text}\n\n"
                     f"【最新对话片段】\n{conversation}\n\n"
-                    "请以 JSON 格式返回她当下的内心报告：\n"
-                    "{\n"
-                    "  \"memories\": [\n"
-                    "    {\n"
-                    "      \"content\": \"...\", \n"
-                    "      \"event_time\": \"2026-03-02 15:04:05 -- ISO 8601 格式\", \n"
-                    "      \"emotion_intensity\": 1-10, \n"
-                    "      \"emotion_category\": \"...\",\n"
-                    "      \"causal_link_id\": null, -- 如果该记忆由之前的碎片 ID 引起，请填写该 ID\n"
-                    "      \"promotion_candidate\": true -- 是否具备性格/习惯的参考价值，值得长期沉淀？\n"
-                    "    }\n"
-                    "  ],\n"
-                    "  \"relational_events\": [{ \"target\": \"resentment\", \"intensity\": \"positive\" }],\n"
-                    "  \"shock_events\": [],\n"
-                    "  \"relationship_narrative\": \"用内心独白的口吻写一句感性总结...\",\n"
-                    "  \"short_term_mood\": { \"mood\": 0.3, \"anger\": 0.5, \"affection\": 0.5, \"jealousy\": 0.0, \"sadness\": 0.6, \"anxiety\": 0.4 }\n"
+                    "输出约束（必须严格遵守）：\n"
+                    "1) 只输出一个合法 JSON 对象，不要使用 markdown 代码块，不要添加注释。\n"
+                    "2) memories 最多 8 条；但如果本周期出现日常约定/待办，必须覆盖到 memories 中；relational_events 最多 3 条；shock_events 仅可含 betrayal/confession。\n"
+                    "3) event_time 使用 RFC3339（例：2026-03-02T15:04:05+08:00），无法判断时填 null。\n"
+                    "4) relational_events.target 只能是 closeness/trust/attraction/dependency/respect/resentment/security/jealousy。\n"
+                    "5) relational_events.intensity 只能是 strong_positive/positive/neutral/negative/strong_negative。\n"
+                    "请返回如下结构的 JSON：\n"
+                    "{"
+                    "\"memories\":[{\"content\":\"...\",\"event_time\":\"2026-03-02T15:04:05+08:00\",\"emotion_intensity\":5.0,\"emotion_category\":\"...\",\"causal_link_id\":null,\"promotion_candidate\":true}],"
+                    "\"relational_events\":[{\"target\":\"resentment\",\"intensity\":\"positive\"}],"
+                    "\"shock_events\":[],"
+                    "\"relationship_narrative\":\"...\""
                     "}"
-                )
-
-                try:
-                    response = self.client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=prompt,
-                        config={'response_mime_type': 'application/json'}
                     )
-                    
-                    if response.text:
-                        data = json.loads(response.text)
-                        
-                        # 1. 保存情景记忆
-                        results = data.get('memories', [])
-                        for res in results:
-                            content = res.get('content')
-                            if not content: continue
-                            
-                            try:
-                                embed_res = self.client.models.embed_content(model='gemini-embedding-001', contents=content)
-                                embedding = embed_res.embeddings[0].values
-                            except: embedding = None
 
-                            event_time = None
-                            if res.get('event_time'):
-                                try: event_time = datetime.fromisoformat(res['event_time'])
-                                except: pass
-
-                            self.db.save_episodic_memory(
-                                character_id=cid,
-                                content=content,
-                                emotion_intensity=float(res.get('emotion_intensity', 5.0)),
-                                promotion_candidate=res.get('promotion_candidate', False),
-                                embedding=embedding,
-                                event_time=event_time,
-                                causal_link_id=res.get('causal_link_id'),
-                                emotion_category=res.get('emotion_category')
-                            )
-                        
-                        # 2. 调用高级演进系统
-                        self.db.update_relationship_advanced(
-                            cid, 
-                            events=data.get('relational_events', []),
-                            shock_events=data.get('shock_events', []),
-                            new_narrative=data.get('relationship_narrative')
+                    try:
+                        response = self.client.models.generate_content(
+                            model='gemini-2.5-flash',
+                            contents=prompt,
+                            config={'response_mime_type': 'application/json'}
                         )
-                except Exception as e:
-                    logger.error(f"提取情景及事件失败 对于角色 {cid}: {e}")
-                    continue
+                        
+                        if response.text:
+                            json_text = self._extract_json_text(response.text)
+                            data = json.loads(json_text)
+                            memories, rel_events, shock_events, relationship_narrative = self._normalize_filter_payload(data)
+                            fallback_memories = self._extract_daily_task_memories(cycle_msgs)
+                            memories = self._merge_memories_with_fallback(memories, fallback_memories)
 
-                processed_ids = [m['id'] for m in msgs]
-                # 标记为已处理
-                if processed_ids:
-                    self.db.mark_messages_extracted(processed_ids)
+                            # 1. 保存情景记忆
+                            for mem in memories:
+                                try:
+                                    embed_res = self.client.models.embed_content(
+                                        model='gemini-embedding-001',
+                                        contents=mem["content"]
+                                    )
+                                    embedding = embed_res.embeddings[0].values
+                                except Exception:
+                                    embedding = None
+
+                                self.db.save_episodic_memory(
+                                    character_id=cid,
+                                    content=mem["content"],
+                                    emotion_intensity=mem["emotion_intensity"],
+                                    promotion_candidate=mem["promotion_candidate"],
+                                    embedding=embedding,
+                                    event_time=mem["event_time"],
+                                    causal_link_id=mem["causal_link_id"],
+                                    emotion_category=mem["emotion_category"]
+                                )
+
+                            # 2. 调用高级演进系统
+                            self.db.update_relationship_advanced(
+                                cid,
+                                events=rel_events,
+                                shock_events=shock_events,
+                                new_narrative=relationship_narrative
+                            )
+
+                        # 标记当前周期消息为已处理
+                        processed_ids = [m['id'] for m in cycle_msgs]
+                        if processed_ids:
+                            self.db.mark_messages_extracted(processed_ids)
+                    except Exception as e:
+                        logger.error(f"提取情景及事件失败 对于角色 {cid} 周期 {cycle_range_text}: {e}")
+                        continue
                 
         except Exception as e:
             logger.error(f"执行过滤任务失败: {e}")
@@ -192,6 +463,11 @@ class MemoryWorker:
                     "   - 【情感锚点】: 那些特定的情感开关。（如：换新裙子被夸产生的巨大喜悦）\n"
                     "4. stability_score: (0.0-1.0) 该认知对灵魂的触动程度。\n"
                     "5. evidence_span: 对这次内心演变的感性自我陈述。\n"
+                    "输出约束（必须严格遵守）：\n"
+                    "- 只输出合法 JSON 数组，不要 markdown，不要注释。\n"
+                    "- 最多输出 6 条结果，且 new 最多 3 条，优先 update 其次 contradict，最后才是 new。\n"
+                    "- action=update/contradict 时 existing_id 必填；action=new 时 existing_id 必须为 null。\n"
+                    "- category 只能是：自我特质/他者画像/关系羁绊/情感锚点。\n"
                 )
 
                 try:
@@ -202,37 +478,48 @@ class MemoryWorker:
                     )
                     
                     if response.text:
-                        results = json.loads(response.text)
-                        for res in results:
-                            action = res.get('action')
-                            
-                            if action == 'update' and res.get('existing_id'):
-                                # 强化已有印记
+                        json_text = self._extract_json_text(response.text)
+                        results = self._normalize_consolidate_items(json.loads(json_text))
+                        new_count = 0
+                        for res in results[:6]:
+                            action = res["action"]
+                            if action == 'update':
                                 self.db.update_core_fact_memory(
-                                    fact_id=res['existing_id'],
-                                    stability_score=float(res.get('stability_score', 0.5)),
-                                    evidence_span=res.get('evidence_span', '日常重复确认')
+                                    fact_id=res["existing_id"],
+                                    stability_score=res["stability_score"],
+                                    evidence_span=res["evidence_span"]
                                 )
-                            elif action == 'contradict' and res.get('existing_id'):
-                                # 现实打破认知，扣分（信念动摇）
-                                self.db.update_validation_score(res['existing_id'], -0.2)
+                            elif action == 'contradict':
+                                self.db.update_validation_score(res["existing_id"], -0.2)
                             elif action == 'new':
-                                # 产生新印记
-                                fact_text = res.get('fact_text')
-                                if fact_text:
-                                    embed_res = self.client.models.embed_content(
-                                        model='gemini-embedding-001',
-                                        contents=fact_text
+                                if new_count >= 3:
+                                    continue
+                                fact_text = res["fact_text"]
+                                embed_res = self.client.models.embed_content(
+                                    model='gemini-embedding-001',
+                                    contents=fact_text
+                                )
+                                embedding = embed_res.embeddings[0].values
+
+                                # 先查相似印记，命中则走 update，避免长期重复堆积
+                                similar = self.db.get_similar_core_fact(cid, embedding, threshold=0.88)
+                                if similar and similar.get('id'):
+                                    self.db.update_core_fact_memory(
+                                        fact_id=similar['id'],
+                                        stability_score=res["stability_score"],
+                                        evidence_span=res["evidence_span"]
                                     )
-                                    embedding = embed_res.embeddings[0].values
-                                    self.db.save_core_fact_memory(
-                                        character_id=cid,
-                                        fact_text=fact_text,
-                                        embedding=embedding,
-                                        category=res.get('category', '灵魂碎片'),
-                                        stability_score=float(res.get('stability_score', 0.5)),
-                                        evidence_span=res.get('evidence_span', '')
-                                    )
+                                    continue
+
+                                self.db.save_core_fact_memory(
+                                    character_id=cid,
+                                    fact_text=fact_text,
+                                    embedding=embedding,
+                                    category=res["category"],
+                                    stability_score=res["stability_score"],
+                                    evidence_span=res["evidence_span"]
+                                )
+                                new_count += 1
                     
                     # 3. 标记这些情景记忆为已处理
                     processed_ids = [m['id'] for m in new_memories]
