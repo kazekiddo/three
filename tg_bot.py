@@ -1265,7 +1265,21 @@ def evaluate_proactive_intent(chat_ai, user_silence_seconds: float, total_silenc
             contents=prompt,
             config=config
         )
-        answer = response.text.strip().upper()
+        answer_text = ""
+        if response and getattr(response, "text", None):
+            answer_text = response.text
+        elif response and getattr(response, "candidates", None):
+            try:
+                first = response.candidates[0]
+                parts = first.content.parts if first and first.content and first.content.parts else []
+                answer_text = "".join([
+                    p.text for p in parts
+                    if getattr(p, "text", None)
+                ])
+            except Exception:
+                answer_text = ""
+
+        answer = answer_text.strip().upper()
         should_send = answer.startswith("YES")
         trigger_hint = f"{user_desc}，{total_desc}。"
         return should_send, trigger_hint

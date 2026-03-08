@@ -312,7 +312,7 @@ class MemoryWorker:
                         
                         if response.text:
                             json_text = self._extract_json_text(response.text)
-                            data = json.loads(json_text)
+                            data = json.loads(json_text, strict=False)
                             memories, rel_events, shock_events, relationship_narrative = self._normalize_filter_payload(data)
 
                             # 1. 保存情景记忆
@@ -411,7 +411,7 @@ class MemoryWorker:
                     
                     if response.text:
                         json_text = self._extract_json_text(response.text)
-                        results = self._normalize_consolidate_items(json.loads(json_text))
+                        results = self._normalize_consolidate_items(json.loads(json_text, strict=False))
                         new_count = 0
                         for res in results[:6]:
                             action = res["action"]
