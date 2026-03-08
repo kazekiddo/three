@@ -823,18 +823,21 @@ class ChatAI:
         response_text = re.sub(r'\[\u7cfb\u7edf\u9644\u52a0[^\]]*\]', '', response_text)
         response_text = response_text.strip()
         
-        # 从 chat history 中清除记忆块，避免 token 累积
-        # 记忆只在当前轮对模型可见，发送后即清除
+        # 从 chat history 中清除系统注入块，避免 token 累积
+        # automatic_function_calling 会在末尾追加 role='user' 的 function_response，
+        # 因此不能只清理“最后一条 user”，要扫描所有 user 文本 part。
         try:
-            for content in reversed(self.chat._curated_history):
-                if content.role == 'user':
-                    for part in content.parts:
-                        if hasattr(part, 'text') and part.text:
-                            # 识别并切割所有类型的系统注入标签
-                            for tag in ['\n\n[系统附加', '\n\n[Deep Relationship', '\n\n[系统时间感知']:
-                                if tag in part.text:
-                                    part.text = part.text[:part.text.index(tag)]
-                    break
+            markers = ['[系统附加', '[Deep Relationship', '[系统时间感知']
+            for content in getattr(self.chat, '_curated_history', []):
+                if getattr(content, 'role', None) != 'user':
+                    continue
+                for part in getattr(content, 'parts', []):
+                    text = getattr(part, 'text', None)
+                    if not text:
+                        continue
+                    cut_points = [text.find(tag) for tag in markers if tag in text]
+                    if cut_points:
+                        part.text = text[:min(cut_points)].rstrip()
         except Exception:
             pass
         
@@ -892,6 +895,8 @@ class ChatAI:
         response_text = response_text.strip()
 
         # 从 chat history 中移除注入的假"用户"触发消息，保持历史干净
+        # automatic_function_calling 可能在末尾追加 function_response(user) 项，
+        # 不能仅检查最后一条 user。
         try:
             history = self.chat._curated_history
             for i in range(len(history) - 1, -1, -1):
@@ -902,7 +907,6 @@ class ChatAI:
                     )
                     if is_proactive:
                         del history[i]
-                    break
         except Exception:
             pass
 
