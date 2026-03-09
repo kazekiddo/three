@@ -212,7 +212,12 @@ class ChatAI:
             # 文件名锚点优先级最高：直接用设定图名决定主体
             has_char_anchor = ("photo_nanase" in text) or ("nanase.jpg" in text)
             has_user_anchor = ("photo_siyuan" in text) or ("siyuan.jpg" in text)
+            has_boy_word = any(k in text for k in ["boy", "man","young man", "male", "男生", "男孩", "男人", "少年"])
+            has_girl_word = any(k in text for k in ["girl", "woman","young woman", "female", "女生", "女孩", "女人", "少女"])
             if has_char_anchor and has_user_anchor:
+                return "both"
+            # 明确出现 boy + girl 时，直接视为双人图
+            if has_boy_word and has_girl_word:
                 return "both"
             # 仅给角色锚点，但语义明确是双人互动时，也判为双人
             likely_second_person_keywords = [
@@ -2075,6 +2080,80 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(history_text)
 
+async def delete_from_last_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /del 命令：全表删除从最后一条 user 消息开始（含该条）的所有记录，并清理关联文件。"""
+    db_for_del = Database()
+
+    try:
+        result = db_for_del.delete_messages_from_last_user()
+    except Exception as e:
+        logger.error(f"/del 删除数据库记录失败: {e}")
+        await update.message.reply_text(f"删除失败：{str(e)}")
+        db_for_del.close()
+        return
+    finally:
+        try:
+            db_for_del.close()
+        except Exception:
+            pass
+
+    last_user_id = result.get("last_user_id")
+    deleted_count = int(result.get("deleted_count") or 0)
+    media_paths = list(result.get("media_paths") or [])
+
+    if last_user_id is None:
+        await update.message.reply_text("未找到 user 消息，未执行删除。")
+        return
+
+    removed_files = 0
+    remove_errors = 0
+    seen_paths = set()
+    for path in media_paths:
+        if not path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                removed_files += 1
+        except Exception as e:
+            logger.error(f"/del 删除媒体文件失败: path={path}, error={e}")
+            remove_errors += 1
+
+    # 重建活跃聊天实例，避免内存中的历史与数据库删除结果不一致
+    if user_chats:
+        try:
+            db = Database()
+            for uid, active_chat in list(user_chats.items()):
+                character_id = getattr(active_chat, "character_id", None)
+                if not character_id:
+                    continue
+                character = db.get_character(character_id)
+                if not character:
+                    continue
+                try:
+                    active_chat.db.close()
+                except Exception:
+                    pass
+                user_chats[uid] = ChatAI(
+                    system_instruction=character['system_instruction'],
+                    character_id=character_id
+                )
+            db.close()
+        except Exception as e:
+            logger.error(f"/del 重建聊天实例失败: {e}")
+
+    msg = (
+        f"已执行删除：从最后一条 user 消息 id={last_user_id} 开始，"
+        f"共删除 {deleted_count} 条记录。"
+    )
+    if media_paths:
+        msg += f"\n已删除媒体文件 {removed_files} 个"
+        if remove_errors:
+            msg += f"（失败 {remove_errors} 个）"
+        msg += "。"
+    await update.message.reply_text(msg)
+
 async def trigger_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /filter 命令，手动触发 filter_task"""
     import asyncio
@@ -2150,6 +2229,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - 显示所有可用角色列表\n"
         "/select &lt;角色ID&gt; - 选择一个角色开始聊天\n"
         "/history - 查看与当前角色的最近 10 条历史记录\n"
+        "/del - 全表删除从最后一条 user 消息开始（含该条）的所有聊天记录，并清理关联媒体文件\n"
         "/filter - 手动触发抽取情景记忆任务 (后台运行)\n"
         "/consolidate - 手动触发巩固核心人格任务 (后台运行)\n"
         "/care_extract [小时] - 手动触发整点关怀提取任务，默认最近 1 小时 (后台运行)\n"
@@ -2427,6 +2507,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("select", select_character))
     application.add_handler(CommandHandler("history", history))
+    application.add_handler(CommandHandler("del", delete_from_last_user))
     application.add_handler(CommandHandler("filter", trigger_filter))
     application.add_handler(CommandHandler("consolidate", trigger_consolidate))
     application.add_handler(CommandHandler("care_extract", trigger_hourly_care_extract))
