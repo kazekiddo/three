@@ -145,8 +145,6 @@ class ChatAI:
         self.last_proactive_image_timestamp = None
         self.proactive_image_cooldown_seconds = int(os.getenv("PROACTIVE_IMAGE_COOLDOWN_SECONDS", "3600"))
         self.proactive_image_probability = float(os.getenv("PROACTIVE_IMAGE_PROBABILITY", "0.35"))
-        self.runtime_history_limit = max(0, int(os.getenv("RUNTIME_HISTORY_LIMIT", "6")))
-        self.dialogue_excerpt_limit = max(0, int(os.getenv("DIALOGUE_EXCERPT_LIMIT", "4")))
         self.dynamic_state = self.db.get_dynamic_state(character_id) if character_id else None
         
         # 预加载角色设定图和用户（思远）设定图 (用于视觉一致性)
@@ -177,10 +175,32 @@ class ChatAI:
             })
         self.base_history = list(history)
 
-        # 仅恢复最后互动时间，不在初始化阶段回灌当天长历史
+        # 从数据库加载动态缓冲：0-4点加载前一天4点后的记录；5-23点加载当天4点后的记录
         if character_id:
             self.last_message_timestamp = self.db.get_last_message_timestamp(character_id)
             self.last_user_message_timestamp = self.db.get_last_user_message_timestamp(character_id)
+            
+            # 计算起始时间，以凌晨 4 点为隔离锚点
+            now = datetime.datetime.now()
+            if now.hour < 4:
+                # 0-3点时，需要回溯到前一天的 4 点
+                since_time = (now - datetime.timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
+            else:
+                # 4点后，只需回溯到今天的 4 点
+                since_time = now.replace(hour=4, minute=0, second=0, microsecond=0)
+            
+            db_messages = self.db.get_recent_chat_history(character_id, since_time=since_time)
+            for msg in db_messages:
+                # 若数据库中有单独的时间锚点缓存，提取并包裹
+                prefix = f"{msg['context_prefix']} " if msg.get('context_prefix') else ""
+                text_content = f"{prefix}{msg['content']}"
+
+                parts = [{'text': text_content}]
+                
+                history.append({
+                    'role': msg['role'],
+                    'parts': parts
+                })
         
         def classify_image_subject(prompt_text: str):
             """根据提示词判断生图主体，返回 character_only/user_only/both/none"""
@@ -370,7 +390,7 @@ class ChatAI:
         self.tools = [generate_image, register_reminder]
         self.pending_output_image = None
         
-        # 创建运行配置（不再依赖持久 chat session，改为每轮显式生成）
+        # 创建聊天
         config = {'automatic_function_calling': {}}
         if system_instruction:
             # 追加图片工具使用约束，防止模型试图直接输出图片
@@ -395,8 +415,12 @@ class ChatAI:
             self.system_instruction = system_instruction + image_constraint + reminder_constraint
             config['system_instruction'] = self.system_instruction
         config['tools'] = self.tools
-        self.runtime_config = config
-        self.base_history = list(history)
+
+        self.chat = self.client.chats.create(
+            model=model,
+            config=config,
+            history=history
+        )
 
     def _ensure_proactive_day_state(self, now_dt: datetime.datetime):
         today = now_dt.date()
@@ -522,12 +546,8 @@ class ChatAI:
             return default
         return text[:limit]
 
-    def _recent_dialogue_excerpt(self, limit=None):
+    def _recent_dialogue_excerpt(self, limit=8):
         if not self.character_id:
-            return ""
-        if limit is None:
-            limit = self.dialogue_excerpt_limit
-        if limit <= 0:
             return ""
         try:
             messages = self.db.get_chat_history(self.character_id, limit=limit)
@@ -578,43 +598,6 @@ class ChatAI:
             f"- 吸引={judge(state.get('attraction'))} 依赖={judge(state.get('dependency'))} 嫉妒={judge(state.get('jealousy'))} 怨念={judge(state.get('resentment'))}\n"
             f"- 当前叙事: {(state.get('narrative') or '暂无').strip()[:80]}\n"
             "回复时只把它当成底色，不要复读这些标签。"
-        )
-
-    def _build_runtime_history(self, limit=None):
-        history = list(self.base_history)
-        if not self.character_id:
-            return history
-        if limit is None:
-            limit = self.runtime_history_limit
-        if limit <= 0:
-            return history
-        try:
-            messages = self.db.get_chat_history(self.character_id, limit=limit)
-        except Exception as e:
-            logger.error(f"读取运行时历史失败: {e}")
-            return history
-
-        for msg in messages:
-            content = (msg.get('content') or '').strip()
-            if not content:
-                continue
-            prefix = f"{msg['context_prefix']} " if msg.get('context_prefix') else ""
-            history.append({
-                'role': msg.get('role') or 'user',
-                'parts': [{'text': f"{prefix}{content}"}]
-            })
-        return history
-
-    def _generate_with_runtime_history(self, user_parts, history_limit=None):
-        contents = self._build_runtime_history(limit=history_limit)
-        contents.append({
-            'role': 'user',
-            'parts': user_parts
-        })
-        return self.client.models.generate_content(
-            model=self.model,
-            contents=contents,
-            config=types.GenerateContentConfig(**self.runtime_config)
         )
 
     @staticmethod
@@ -870,7 +853,7 @@ class ChatAI:
         now_dt = datetime.datetime.now()
         existing_state = self.db.get_dynamic_state(self.character_id) or self.dynamic_state or {}
         carryover_state = self._derive_carryover_state(existing_state, now_dt)
-        recent_dialogue = self._recent_dialogue_excerpt()
+        recent_dialogue = self._recent_dialogue_excerpt(limit=8)
         now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
         relationship_context = relation_desc.strip() if relation_desc else "暂无额外关系上下文"
         existing_state_json = json.dumps(existing_state, ensure_ascii=False, default=str)
@@ -1335,8 +1318,19 @@ class ChatAI:
                 logger.error(f"整点自动安排情境关怀提醒失败: {e}")
             
     def clear_history(self):
-        """显式生成模式下无需重建 chat session，仅保留基础历史"""
-        logger.info(f"角色 {self.character_id} 运行于短上下文模式，无需清空持久 chat session")
+        """每天凌晨清空一次内存中的长对话列表，同时保留工具能力"""
+        logger.info(f"正在清空角色 {self.character_id} 的短期对话感知缓冲...")
+        
+        config = {'automatic_function_calling': {}}
+        if self.system_instruction:
+            config['system_instruction'] = self.system_instruction
+        config['tools'] = self.tools
+
+        self.chat = self.client.chats.create(
+            model=self.model,
+            config=config,
+            history=self.base_history
+        )
     
     def send_message(self, message, image_data=None, image_mime_type=None, media_path=None):
         """发送消息并获取回复"""
@@ -1486,12 +1480,12 @@ class ChatAI:
         self.pending_output_image = None
 
         # 构造多模态消息 Parts
-        message_parts = [{'text': augmented_message}]
+        message_parts = [augmented_message]
         if image_data:
             message_parts.append(types.Part.from_bytes(data=image_data, mime_type=image_mime_type))
 
-        # 显式生成：只携带短历史，避免持久 chat session 无限累积 token
-        response = self._generate_with_runtime_history(message_parts, history_limit=12)
+        # 获取AI回复（automatic_function_calling 在 send_message 内部自动完成，response 是最终响应）
+        response = self.chat.send_message(message_parts)
         response_text = ""
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
@@ -1504,6 +1498,24 @@ class ChatAI:
         response_text = re.sub(r'\[SYS_PROACTIVE[^\]]*\]', '', response_text)
         response_text = re.sub(r'\[\u7cfb\u7edf\u9644\u52a0[^\]]*\]', '', response_text)
         response_text = response_text.strip()
+        
+        # 从 chat history 中清除系统注入块，避免 token 累积
+        # automatic_function_calling 会在末尾追加 role='user' 的 function_response，
+        # 因此不能只清理“最后一条 user”，要扫描所有 user 文本 part。
+        try:
+            markers = ['[系统附加', '[Deep Relationship', '[系统时间感知']
+            for content in getattr(self.chat, '_curated_history', []):
+                if getattr(content, 'role', None) != 'user':
+                    continue
+                for part in getattr(content, 'parts', []):
+                    text = getattr(part, 'text', None)
+                    if not text:
+                        continue
+                    cut_points = [text.find(tag) for tag in markers if tag in text]
+                    if cut_points:
+                        part.text = text[:min(cut_points)].rstrip()
+        except Exception:
+            pass
         
         # 提取生成图片的路径（如果有的话）
         image_path = self.pending_output_image
@@ -1564,7 +1576,7 @@ class ChatAI:
 
         self.pending_output_image = None
 
-        response = self._generate_with_runtime_history([{'text': trigger_msg}], history_limit=12)
+        response = self.chat.send_message([trigger_msg])
 
         response_text = ""
         if response.candidates and response.candidates[0].content.parts:
@@ -1577,6 +1589,22 @@ class ChatAI:
         response_text = re.sub(r'\[SYS_PROACTIVE[^\]]*\]', '', response_text)
         response_text = re.sub(r'\[\u7cfb\u7edf\u9644\u52a0[^\]]*\]', '', response_text)
         response_text = response_text.strip()
+
+        # 从 chat history 中移除注入的假"用户"触发消息，保持历史干净
+        # automatic_function_calling 可能在末尾追加 function_response(user) 项，
+        # 不能仅检查最后一条 user。
+        try:
+            history = self.chat._curated_history
+            for i in range(len(history) - 1, -1, -1):
+                if history[i].role == 'user':
+                    is_proactive = any(
+                        hasattr(p, 'text') and p.text and '[SYS_PROACTIVE]' in p.text
+                        for p in history[i].parts
+                    )
+                    if is_proactive:
+                        del history[i]
+        except Exception:
+            pass
 
         image_path = self.pending_output_image
         
