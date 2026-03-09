@@ -214,6 +214,19 @@ class ChatAI:
             has_user_anchor = ("photo_siyuan" in text) or ("siyuan.jpg" in text)
             if has_char_anchor and has_user_anchor:
                 return "both"
+            # 仅给角色锚点，但语义明确是双人互动时，也判为双人
+            likely_second_person_keywords = [
+                "young man", "man", "boy", "male",
+                "男生", "男人", "男孩", "少年", "他"
+            ]
+            dual_interaction_keywords = [
+                "hug", "hugging", "embrace", "from behind", "couple", "intimate", "romantic",
+                "抱", "拥抱", "搂", "从背后", "同框", "情侣", "亲密"
+            ]
+            if has_char_anchor and any(k in text for k in likely_second_person_keywords) and any(
+                k in text for k in dual_interaction_keywords
+            ):
+                return "both"
             if has_char_anchor:
                 return "character_only"
             if has_user_anchor:
@@ -231,11 +244,12 @@ class ChatAI:
             ]
             # 这里避免使用裸词 you / me，减少误判为双人图
             character_keywords = [
-                "你自己", "小七", "nanase","Xiao Qi", "the girl", "the character", "woman"
-                "你的照片", "你的样子", "自拍", "solo girl", "girl only", "character only"
+                "你自己", "小七", "xiaoqi", "xiao qi", "nanase",
+                "the girl", "the character", "你的照片", "你的样子", "自拍",
+                "solo girl", "girl only", "character only"
             ]
             user_keywords = [
-                "我自己", "思远", "siyuan","Siyuan", "the user", "user only", "我的照片", "man"
+                "我自己", "思远", "siyuan", "the user", "user only", "我的照片",
                 "我长什么样", "给我画", "my portrait", "draw me", "me only"
             ]
             person_keywords = [
