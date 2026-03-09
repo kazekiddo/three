@@ -773,9 +773,9 @@ class ChatAI:
 
         return carry
 
-    def _refresh_dynamic_state(self, latest_user_message: str, relation_desc: str = ""):
+    def _infer_state_and_plan(self, latest_user_message: str, relation_desc: str = "", image_requested=False, proactive=False):
         if not self.character_id or not latest_user_message.strip():
-            return self.dynamic_state
+            return self.dynamic_state, {}
 
         now_dt = datetime.datetime.now()
         existing_state = self.db.get_dynamic_state(self.character_id) or self.dynamic_state or {}
@@ -788,9 +788,10 @@ class ChatAI:
 
         prompt = (
             f"当前时间（Asia/Shanghai）: {now_str}\n"
-            "你是角色的【短期心智状态引擎】。你的任务不是代替角色回复，而是推断她这一刻真实的内在状态。\n"
-            "请综合既有状态、时间衰减后的延续状态、最近对话和用户这条新消息，输出一个 JSON 对象，字段必须完整：\n"
+            "你是角色的【短期心智状态引擎 + 回合表达导演】。你的任务不是直接代替角色回复，而是先判断她此刻的内在状态，再决定这轮该怎么回。\n"
+            "请输出一个 JSON 对象，包含 state 和 plan 两部分：\n"
             "{"
+            "\"state\":{"
             "\"scene_label\":\"...\","
             "\"emotion_label\":\"...\","
             "\"emotion_intensity\":0.0,"
@@ -806,23 +807,37 @@ class ChatAI:
             "\"initiative_bias\":0.0,"
             "\"last_trigger_source\":\"...\","
             "\"repair_status\":\"...\""
+            "},"
+            "\"plan\":{"
+            "\"response_mode\":\"...\","
+            "\"tone\":\"...\","
+            "\"goal\":\"...\","
+            "\"should_ask_question\":true,"
+            "\"should_tease\":false,"
+            "\"should_offer_help\":false,"
+            "\"should_reference_memory\":false,"
+            "\"should_be_extra_brief\":true,"
+            "\"max_sentences\":2,"
+            "\"warmth_level\":0.0,"
+            "\"initiative_level\":0.0,"
+            "\"notes\":\"...\""
+            "}"
             "}\n"
             "约束：\n"
-            "1) scene_label 必须是简短场景标签，如 日常/撒娇/求助/汇报/邀约/冲突/修复/试探/分享/敷衍。\n"
-            "2) emotion_label 用简短中文，如 平静/开心/委屈/不安/吃醋/烦躁/想撒娇。\n"
-            "3) emotion_intensity、warmth_bias、initiative_bias 都在 0.0 到 1.0 之间。\n"
-            "4) motivation_label 说明她此刻最想做的事，如 接住他/求关注/确认态度/轻微吃醋/认真帮忙。\n"
-            "5) inhibition_label 说明她此刻在克制什么；若没有写 无。\n"
-            "6) hidden_expectation 写她隐隐希望对方怎么做，但不要写成命令。\n"
-            "7) user_affect 写你感受到的用户状态，如 开心/疲惫/敷衍/认真/求安慰/想分享。\n"
-            "8) unresolved_need 写本轮后她心里最没被满足的那个点，若没有可写 无明显缺口。\n"
-            "9) carryover_summary 写一句 35 字内的情绪余波，表示这轮之后会残留什么感觉。\n"
-            "10) reply_style 只描述表达方式，不能直接代写台词。\n"
-            "11) repair_status 表示关系修复状态，如 无需修复/待安抚/正在变软/有点别扭/已被哄好。\n"
-            "12) 只输出 JSON，不要 markdown，不要解释。\n\n"
+            "1) state.scene_label 必须是简短场景标签，如 日常/撒娇/求助/汇报/邀约/冲突/修复/试探/分享/敷衍。\n"
+            "2) state.emotion_label 用简短中文，如 平静/开心/委屈/不安/吃醋/烦躁/想撒娇。\n"
+            "3) state.emotion_intensity、state.warmth_bias、state.initiative_bias、plan.warmth_level、plan.initiative_level 都在 0.0 到 1.0 之间。\n"
+            "4) state.reply_style 只描述表达方式，不能直接代写台词。\n"
+            "5) plan.response_mode 只能是 接住/安抚/调情/吐槽/认真帮忙/轻微吃醋/追问/冷一点/分享/提醒。\n"
+            "6) plan.goal 只写这轮唯一主目标；plan.max_sentences 取 1 到 4，大多数情况不超过 2。\n"
+            "7) plan.should_offer_help 只有用户在求助、卡住、焦虑或明确要方案时才为 true。\n"
+            "8) plan.should_tease 只在气氛安全时使用。\n"
+            "9) 只输出 JSON，不要 markdown，不要解释。\n\n"
             f"已有短期状态：{existing_state_json}\n\n"
             f"按时间衰减后的延续状态：{carryover_state_json}\n\n"
             f"关系上下文：\n{relationship_context}\n\n"
+            f"是否用户索图：{'是' if image_requested else '否'}\n"
+            f"是否主动发言：{'是' if proactive else '否'}\n\n"
             f"最近对话：\n{recent_dialogue or '暂无'}\n\n"
             f"用户新消息：\n{latest_user_message}"
         )
@@ -838,12 +853,12 @@ class ChatAI:
             )
             raw_text = response.text.strip() if response and response.text else ""
             payload = self._safe_json_loads(raw_text) if raw_text else {}
-            normalized = self._normalize_dynamic_state(payload, fallback=carryover_state or existing_state)
+            normalized = self._normalize_dynamic_state(payload.get("state"), fallback=carryover_state or existing_state)
             normalized, rule_notes = self._apply_dynamic_state_rules(
                 normalized,
                 latest_user_message,
                 relation_desc=relationship_context,
-                proactive=False
+                proactive=proactive
             )
             self.db.upsert_dynamic_state(
                 self.character_id,
@@ -866,15 +881,65 @@ class ChatAI:
             self.dynamic_state = normalized
             self._persist_dynamic_state_snapshot(
                 normalized,
-                source_kind="pre_reply",
+                source_kind="pre_proactive" if proactive else "pre_reply",
                 trigger_message=latest_user_message,
-                notes="；".join(rule_notes) if rule_notes else "pre_reply_state"
+                notes="；".join(rule_notes) if rule_notes else ("pre_proactive_state" if proactive else "pre_reply_state")
             )
-            return normalized
+            state_json = json.dumps({
+                "scene_label": normalized.get("scene_label"),
+                "emotion_label": normalized.get("emotion_label"),
+                "emotion_intensity": normalized.get("emotion_intensity"),
+                "motivation_label": normalized.get("motivation_label"),
+                "user_affect": normalized.get("user_affect"),
+                "repair_status": normalized.get("repair_status"),
+                "warmth_bias": normalized.get("warmth_bias"),
+                "initiative_bias": normalized.get("initiative_bias"),
+            }, ensure_ascii=False, default=str)
+            plan_payload = payload.get("plan") if isinstance(payload, dict) else {}
+            if not isinstance(plan_payload, dict):
+                plan_payload = {}
+            try:
+                max_sentences = int(plan_payload.get("max_sentences", 2))
+            except Exception:
+                max_sentences = 2
+            plan = {
+                "response_mode": self._clean_state_text(plan_payload.get("response_mode"), "接住", limit=40),
+                "tone": self._clean_state_text(plan_payload.get("tone"), "嘴硬里带一点软", limit=60),
+                "goal": self._clean_state_text(plan_payload.get("goal"), "先接住对方 再保持点亲密感", limit=100),
+                "should_ask_question": bool(plan_payload.get("should_ask_question", False)),
+                "should_tease": bool(plan_payload.get("should_tease", False)),
+                "should_offer_help": bool(plan_payload.get("should_offer_help", False)),
+                "should_reference_memory": bool(plan_payload.get("should_reference_memory", False)),
+                "should_be_extra_brief": bool(plan_payload.get("should_be_extra_brief", True)),
+                "max_sentences": max(1, min(max_sentences, 4)),
+                "warmth_level": self._normalize_float(
+                    plan_payload.get("warmth_level", normalized.get("warmth_bias", 0.58)),
+                    fallback=float(normalized.get("warmth_bias", 0.58))
+                ),
+                "initiative_level": self._normalize_float(
+                    plan_payload.get("initiative_level", normalized.get("initiative_bias", 0.46)),
+                    fallback=float(normalized.get("initiative_bias", 0.46))
+                ),
+                "notes": self._clean_state_text(plan_payload.get("notes"), "别太像助手", limit=120)
+            }
+            return normalized, plan
         except Exception as e:
-            logger.error(f"刷新动态心智状态失败: {e}")
+            logger.error(f"推断状态与决策失败: {e}")
             self.dynamic_state = self._normalize_dynamic_state({}, fallback=carryover_state or existing_state)
-            return self.dynamic_state
+            return self.dynamic_state, {
+                "response_mode": "接住",
+                "tone": "嘴硬里带一点软",
+                "goal": "先接住对方 再保持点亲密感",
+                "should_ask_question": False,
+                "should_tease": False,
+                "should_offer_help": False,
+                "should_reference_memory": False,
+                "should_be_extra_brief": True,
+                "max_sentences": 2,
+                "warmth_level": float(self.dynamic_state.get("warmth_bias", 0.58)),
+                "initiative_level": float(self.dynamic_state.get("initiative_bias", 0.46)),
+                "notes": "别太像助手"
+            }
 
     def _update_post_reply_state(self, trigger_message, model_reply, base_state, turn_plan=None, proactive=False):
         if not self.character_id or not base_state:
@@ -961,100 +1026,6 @@ class ChatAI:
         except Exception as e:
             logger.error(f"写入回合后余波状态失败: {e}")
         return state
-
-    def _plan_turn_response(self, latest_user_message, dynamic_state, relation_desc="", image_requested=False, proactive=False):
-        if not latest_user_message.strip():
-            return {}
-
-        state = dynamic_state or self.dynamic_state or {}
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        state_json = json.dumps({
-            "scene_label": state.get("scene_label"),
-            "emotion_label": state.get("emotion_label"),
-            "emotion_intensity": state.get("emotion_intensity"),
-            "motivation_label": state.get("motivation_label"),
-            "user_affect": state.get("user_affect"),
-            "repair_status": state.get("repair_status"),
-            "warmth_bias": state.get("warmth_bias"),
-            "initiative_bias": state.get("initiative_bias"),
-        }, ensure_ascii=False, default=str)
-        prompt = (
-            f"当前时间（Asia/Shanghai）: {now_str}\n"
-            "你是角色的【回合表达导演】。你不直接写回复，只决定这轮要怎么回才更像真人。\n"
-            "请输出一个 JSON 对象：\n"
-            "{"
-            "\"response_mode\":\"...\","
-            "\"tone\":\"...\","
-            "\"goal\":\"...\","
-            "\"should_ask_question\":true,"
-            "\"should_tease\":false,"
-            "\"should_offer_help\":false,"
-            "\"should_reference_memory\":false,"
-            "\"should_be_extra_brief\":true,"
-            "\"max_sentences\":2,"
-            "\"warmth_level\":0.0,"
-            "\"initiative_level\":0.0,"
-            "\"notes\":\"...\""
-            "}\n"
-            "规则：\n"
-            "1) response_mode 只能是 接住/安抚/调情/吐槽/认真帮忙/轻微吃醋/追问/冷一点/分享/提醒。\n"
-            "2) tone 用短中文，如 软一点/嘴硬/认真/懒散/委屈里带刺/撒娇/故作无所谓。\n"
-            "3) goal 写这轮唯一主目标。\n"
-            "4) max_sentences 取 1 到 4；大多数情况不超过 2。\n"
-            "5) should_ask_question 只有在推进互动真有必要时才为 true。\n"
-            "6) should_reference_memory 只有对提升亲密感有帮助时才为 true。\n"
-            "7) should_offer_help 只有用户在求助、卡住、焦虑或明确要方案时才为 true。\n"
-            "8) should_tease 只在气氛安全时使用。\n"
-            "9) notes 写一句表达提醒，比如 别解释太满/先顺毛再逗/别太像助手。\n"
-            "10) 只输出 JSON。\n\n"
-            f"当前动态状态：{state_json}\n\n"
-            f"关系上下文：\n{(relation_desc or '暂无')[:240]}\n\n"
-            f"是否用户索图：{'是' if image_requested else '否'}\n"
-            f"是否主动发言：{'是' if proactive else '否'}\n\n"
-            f"用户消息或触发语：\n{latest_user_message}"
-        )
-
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type='application/json',
-                    temperature=0.2
-                )
-            )
-            payload = self._safe_json_loads(response.text.strip() if response and response.text else "")
-            if not isinstance(payload, dict):
-                payload = {}
-        except Exception as e:
-            logger.error(f"生成回合表达决策失败: {e}")
-            payload = {}
-
-        try:
-            max_sentences = int(payload.get("max_sentences", 2))
-        except Exception:
-            max_sentences = 2
-
-        return {
-            "response_mode": self._clean_state_text(payload.get("response_mode"), "接住", limit=40),
-            "tone": self._clean_state_text(payload.get("tone"), "嘴硬里带一点软", limit=60),
-            "goal": self._clean_state_text(payload.get("goal"), "先接住对方 再保持点亲密感", limit=100),
-            "should_ask_question": bool(payload.get("should_ask_question", False)),
-            "should_tease": bool(payload.get("should_tease", False)),
-            "should_offer_help": bool(payload.get("should_offer_help", False)),
-            "should_reference_memory": bool(payload.get("should_reference_memory", False)),
-            "should_be_extra_brief": bool(payload.get("should_be_extra_brief", True)),
-            "max_sentences": max(1, min(max_sentences, 4)),
-            "warmth_level": self._normalize_float(
-                payload.get("warmth_level", state.get("warmth_bias", 0.58)),
-                fallback=float(state.get("warmth_bias", 0.58))
-            ),
-            "initiative_level": self._normalize_float(
-                payload.get("initiative_level", state.get("initiative_bias", 0.46)),
-                fallback=float(state.get("initiative_bias", 0.46))
-            ),
-            "notes": self._clean_state_text(payload.get("notes"), "别太像助手", limit=120)
-        }
 
     def _build_dynamic_state_prompt(self, state=None, turn_plan=None):
         state = state or self.dynamic_state
@@ -1379,10 +1350,8 @@ class ChatAI:
                 logging.getLogger(__name__).error(f"检索记忆失败: {e}")
 
         if self.character_id:
-            dynamic_state = self._refresh_dynamic_state(message, relation_desc=compact_relation_desc)
-            turn_plan = self._plan_turn_response(
+            dynamic_state, turn_plan = self._infer_state_and_plan(
                 message,
-                dynamic_state,
                 relation_desc=compact_relation_desc,
                 image_requested=self._should_prefer_image_response(message, image_data=image_data),
                 proactive=False
@@ -1513,21 +1482,10 @@ class ChatAI:
 
         # 触发提示：以特殊标记开头，便于事后从 chat history 中识别并移除
         current_state = self.dynamic_state or (self.db.get_dynamic_state(self.character_id) if self.character_id else None)
-        if current_state:
-            current_state, proactive_rule_notes = self._apply_dynamic_state_rules(
-                current_state,
-                trigger_hint,
-                proactive=True
-            )
-            self._persist_dynamic_state_snapshot(
-                current_state,
-                source_kind="pre_proactive",
-                trigger_message=trigger_hint,
-                notes="；".join(proactive_rule_notes) if proactive_rule_notes else "pre_proactive_state"
-            )
-        proactive_plan = self._plan_turn_response(
+        current_state, proactive_plan = self._infer_state_and_plan(
             trigger_hint,
-            current_state,
+            relation_desc=self._build_compact_relationship_context(),
+            image_requested=False,
             proactive=True
         )
         dynamic_state_prompt = self._build_dynamic_state_prompt(
