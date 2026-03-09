@@ -209,6 +209,16 @@ class ChatAI:
             if not text:
                 return "none"
 
+            # 文件名锚点优先级最高：直接用设定图名决定主体
+            has_char_anchor = ("photo_nanase" in text) or ("nanase.jpg" in text)
+            has_user_anchor = ("photo_siyuan" in text) or ("siyuan.jpg" in text)
+            if has_char_anchor and has_user_anchor:
+                return "both"
+            if has_char_anchor:
+                return "character_only"
+            if has_user_anchor:
+                return "user_only"
+
             explicit_non_portrait_keywords = [
                 "纯风景", "只有风景", "不要人物", "不需要人物", "无人", "没人",
                 "纯场景", "纯物体", "只有物体", "静物", "产品图",
@@ -217,15 +227,16 @@ class ChatAI:
             ]
             both_keywords = [
                 "我们", "一起", "同框", "合照", "你和我", "我和你", "咱俩", "两个人",
-                "both of us", "together", "couple", "with me", "with siyuan", "with the user"
+                "both of us", "you and me", "me and you", "with siyuan", "with the user", "couple shot"
             ]
+            # 这里避免使用裸词 you / me，减少误判为双人图
             character_keywords = [
-                "你", "你自己", "小七", "nanase", "girl", "the girl", "the character",
-                "自拍", "你的照片", "你的样子", "你在", "you", "yourself"
+                "你自己", "小七", "nanase", "the girl", "the character",
+                "你的照片", "你的样子", "自拍", "solo girl", "girl only", "character only"
             ]
             user_keywords = [
-                "我", "我自己", "思远", "siyuan", "the user", "user only", "我的照片",
-                "我长什么样", "给我画", "me", "myself"
+                "我自己", "思远", "siyuan", "the user", "user only", "我的照片",
+                "我长什么样", "给我画", "my portrait", "draw me", "me only"
             ]
             person_keywords = [
                 "人", "人物", "女生", "女孩", "男生", "肖像", "自拍", "半身", "全身",
@@ -313,6 +324,11 @@ class ChatAI:
                 return text
 
             patterns = [
+                # file-name anchors should not become scene content
+                r"\bphoto_nanase(?:\.jpg)?\b",
+                r"\bphoto_siyuan(?:\.jpg)?\b",
+                r"\bnanase\.jpg\b",
+                r"\bsiyuan\.jpg\b",
                 # English hair descriptors
                 r"\b(long|short|medium|shoulder[- ]length|waist[- ]length)\s+(straight|wavy|curly)?\s*hair\b",
                 r"\b(straight|wavy|curly)\s+(black|brown|blonde|silver|white|red|pink|blue|purple)?\s*hair\b",
