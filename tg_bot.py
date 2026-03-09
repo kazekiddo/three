@@ -231,11 +231,11 @@ class ChatAI:
             ]
             # 这里避免使用裸词 you / me，减少误判为双人图
             character_keywords = [
-                "你自己", "小七", "nanase", "the girl", "the character",
+                "你自己", "小七", "nanase","Xiao Qi", "the girl", "the character", "woman"
                 "你的照片", "你的样子", "自拍", "solo girl", "girl only", "character only"
             ]
             user_keywords = [
-                "我自己", "思远", "siyuan", "the user", "user only", "我的照片",
+                "我自己", "思远", "siyuan","Siyuan", "the user", "user only", "我的照片", "man"
                 "我长什么样", "给我画", "my portrait", "draw me", "me only"
             ]
             person_keywords = [
