@@ -145,6 +145,8 @@ class ChatAI:
         self.last_proactive_image_timestamp = None
         self.proactive_image_cooldown_seconds = int(os.getenv("PROACTIVE_IMAGE_COOLDOWN_SECONDS", "3600"))
         self.proactive_image_probability = float(os.getenv("PROACTIVE_IMAGE_PROBABILITY", "0.35"))
+        self.runtime_history_limit = max(0, int(os.getenv("RUNTIME_HISTORY_LIMIT", "6")))
+        self.dialogue_excerpt_limit = max(0, int(os.getenv("DIALOGUE_EXCERPT_LIMIT", "4")))
         self.dynamic_state = self.db.get_dynamic_state(character_id) if character_id else None
         
         # 预加载角色设定图和用户（思远）设定图 (用于视觉一致性)
@@ -175,32 +177,10 @@ class ChatAI:
             })
         self.base_history = list(history)
 
-        # 从数据库加载动态缓冲：0-4点加载前一天4点后的记录；5-23点加载当天4点后的记录
+        # 仅恢复最后互动时间，不在初始化阶段回灌当天长历史
         if character_id:
             self.last_message_timestamp = self.db.get_last_message_timestamp(character_id)
             self.last_user_message_timestamp = self.db.get_last_user_message_timestamp(character_id)
-            
-            # 计算起始时间，以凌晨 4 点为隔离锚点
-            now = datetime.datetime.now()
-            if now.hour < 4:
-                # 0-3点时，需要回溯到前一天的 4 点
-                since_time = (now - datetime.timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
-            else:
-                # 4点后，只需回溯到今天的 4 点
-                since_time = now.replace(hour=4, minute=0, second=0, microsecond=0)
-            
-            db_messages = self.db.get_recent_chat_history(character_id, since_time=since_time)
-            for msg in db_messages:
-                # 若数据库中有单独的时间锚点缓存，提取并包裹
-                prefix = f"{msg['context_prefix']} " if msg.get('context_prefix') else ""
-                text_content = f"{prefix}{msg['content']}"
-
-                parts = [{'text': text_content}]
-                
-                history.append({
-                    'role': msg['role'],
-                    'parts': parts
-                })
         
         def classify_image_subject(prompt_text: str):
             """根据提示词判断生图主体，返回 character_only/user_only/both/none"""
@@ -542,8 +522,12 @@ class ChatAI:
             return default
         return text[:limit]
 
-    def _recent_dialogue_excerpt(self, limit=8):
+    def _recent_dialogue_excerpt(self, limit=None):
         if not self.character_id:
+            return ""
+        if limit is None:
+            limit = self.dialogue_excerpt_limit
+        if limit <= 0:
             return ""
         try:
             messages = self.db.get_chat_history(self.character_id, limit=limit)
@@ -596,9 +580,13 @@ class ChatAI:
             "回复时只把它当成底色，不要复读这些标签。"
         )
 
-    def _build_runtime_history(self, limit=12):
+    def _build_runtime_history(self, limit=None):
         history = list(self.base_history)
         if not self.character_id:
+            return history
+        if limit is None:
+            limit = self.runtime_history_limit
+        if limit <= 0:
             return history
         try:
             messages = self.db.get_chat_history(self.character_id, limit=limit)
@@ -617,7 +605,7 @@ class ChatAI:
             })
         return history
 
-    def _generate_with_runtime_history(self, user_parts, history_limit=12):
+    def _generate_with_runtime_history(self, user_parts, history_limit=None):
         contents = self._build_runtime_history(limit=history_limit)
         contents.append({
             'role': 'user',
@@ -882,7 +870,7 @@ class ChatAI:
         now_dt = datetime.datetime.now()
         existing_state = self.db.get_dynamic_state(self.character_id) or self.dynamic_state or {}
         carryover_state = self._derive_carryover_state(existing_state, now_dt)
-        recent_dialogue = self._recent_dialogue_excerpt(limit=8)
+        recent_dialogue = self._recent_dialogue_excerpt()
         now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
         relationship_context = relation_desc.strip() if relation_desc else "暂无额外关系上下文"
         existing_state_json = json.dumps(existing_state, ensure_ascii=False, default=str)
