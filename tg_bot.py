@@ -202,6 +202,86 @@ class ChatAI:
                     'parts': parts
                 })
         
+        def classify_image_subject(prompt_text: str):
+            """根据提示词判断生图主体，返回 character_only/user_only/both/none"""
+            text = (prompt_text or "").strip().lower()
+            if not text:
+                return "none"
+
+            both_keywords = [
+                "我们", "一起", "同框", "合照", "你和我", "我和你", "咱俩", "两个人",
+                "both of us", "together", "couple", "with me", "with siyuan", "with the user"
+            ]
+            character_keywords = [
+                "你", "你自己", "小七", "nanase", "girl", "the girl", "the character",
+                "自拍", "你的照片", "你的样子", "你在", "you", "yourself"
+            ]
+            user_keywords = [
+                "我", "我自己", "思远", "siyuan", "the user", "user only", "我的照片",
+                "我长什么样", "给我画", "me", "myself"
+            ]
+
+            if any(k in text for k in both_keywords):
+                return "both"
+
+            has_character = any(k in text for k in character_keywords)
+            has_user = any(k in text for k in user_keywords)
+
+            if has_character and has_user:
+                return "both"
+            if has_character:
+                return "character_only"
+            if has_user:
+                return "user_only"
+            return "none"
+
+        def build_image_prompt(prompt_text: str, subject_mode: str) -> str:
+            """构造更强的 identity preservation 提示词"""
+            base_scene = (prompt_text or "").strip()
+            if not base_scene:
+                base_scene = "A high quality Japanese anime illustration."
+
+            if subject_mode == "character_only":
+                identity_block = (
+                    "Create an illustration of the exact same girl as reference image 1. "
+                    "She must remain the same person, not a redesigned variant. "
+                    "Identity preservation requirements: keep the same face shape, eyes, eye shape, hairstyle, bangs, "
+                    "hair color, age impression, and overall facial identity. Do not turn her into a different anime girl. "
+                    "Reference image 1 is the main and only identity reference."
+                )
+            elif subject_mode == "user_only":
+                identity_block = (
+                    "Create an illustration of the exact same person as reference image 1. "
+                    "He must remain the same person, not a redesigned variant. "
+                    "Identity preservation requirements: keep the same face shape, eyes, hairstyle, hair color, "
+                    "age impression, and overall facial identity. Do not redesign him into a different anime character. "
+                    "Reference image 1 is the main and only identity reference."
+                )
+            elif subject_mode == "both":
+                identity_block = (
+                    "Create an illustration featuring the same two people as the two reference images. "
+                    "Reference image 1 is the girl, reference image 2 is the user Siyuan. "
+                    "Both must remain the same people, not redesigned variants. "
+                    "Preserve each person's face shape, eyes, hairstyle, hair color, age impression, "
+                    "and overall identity. Do not merge their facial features."
+                )
+            else:
+                identity_block = (
+                    "Create a high quality Japanese anime illustration. "
+                    "No identity reference is required unless a specific person is clearly requested."
+                )
+
+            return (
+                f"{identity_block}\n\n"
+                f"Scene request:\n{base_scene}\n\n"
+                "Style requirements:\n"
+                "- Strictly Japanese anime / cartoon style\n"
+                "- clean line art\n"
+                "- coherent facial structure\n"
+                "- soft natural lighting\n"
+                "- avoid changing the identity of referenced people\n"
+            )
+
         # 定义 AI 生成图片的工具
         def generate_image(prompt: str) -> str:
             """根据描述生成一张精美的图片。
@@ -210,27 +290,19 @@ class ChatAI:
                 prompt: 详细的图片描述词，使用英文描述效果更佳。
             """
             try:
-                # 按照用户提供的“图片编辑/视觉参考”逻辑：采用 [Prompt, Image1, Image2...] 列表形式
                 generation_contents = []
-                
-                # 读取 prompt，并在 prompt 中补充提示，强制要求日系卡通风格，并指明参考图归属
-                full_prompt = (
-                    f"{prompt}. "
-                    "STYLE REQUIREMENT: Strictly follow Japanese anime / cartoon style. "
-                    "(Reference image 1 is the character Nanase, Reference image 2 is the user Siyuan)"
-                )
+                subject_mode = classify_image_subject(prompt)
+                full_prompt = build_image_prompt(prompt, subject_mode)
                 generation_contents.append(full_prompt)
-                
-                # 1. 加载角色设定图 (Nanase)
-                if os.path.exists(self.character_photo_path):
+
+                if subject_mode in ("character_only", "both") and os.path.exists(self.character_photo_path):
                     try:
                         ref_char_image = Image.open(self.character_photo_path)
                         generation_contents.append(ref_char_image)
                     except Exception as e:
                         logger.error(f"加载角色设定图失败: {e}")
-                
-                # 2. 加载用户设定图 (Siyuan)
-                if os.path.exists(self.user_photo_path):
+
+                if subject_mode in ("user_only", "both") and os.path.exists(self.user_photo_path):
                     try:
                         ref_user_image = Image.open(self.user_photo_path)
                         generation_contents.append(ref_user_image)
@@ -326,6 +398,7 @@ class ChatAI:
                 "\n\n【重要工具使用规则】"
                 "你不能直接输出或嵌入图片。你没有原生图片输出能力。"
                 "当用户请求图片、自拍、照片时，你必须调用 generate_image 工具函数来生成图片。"
+                "调用 generate_image 时，请在 prompt 里明确写清楚画的是‘你自己’、‘思远本人’还是‘你和思远同框’，不要含糊带过。"
                 "绝对不要在回复中写 'Here is the original image' 或类似的占位文字。"
                 "调用工具后，系统会自动将图片发送给用户。"
             )
