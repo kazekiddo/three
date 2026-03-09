@@ -630,6 +630,124 @@ class ChatAI:
             ),
         }
 
+    def _persist_dynamic_state_snapshot(self, state, source_kind, trigger_message=None, model_reply=None, notes=None):
+        if not self.character_id or not state:
+            return
+        try:
+            self.db.insert_dynamic_state_history(
+                self.character_id,
+                source_kind,
+                state.get("scene_label"),
+                state.get("emotion_label"),
+                state.get("emotion_intensity"),
+                state.get("motivation_label"),
+                state.get("inhibition_label"),
+                state.get("hidden_expectation"),
+                state.get("last_user_intent"),
+                state.get("user_affect"),
+                state.get("unresolved_need"),
+                state.get("carryover_summary"),
+                state.get("reply_style"),
+                state.get("warmth_bias"),
+                state.get("initiative_bias"),
+                state.get("last_trigger_source"),
+                state.get("repair_status"),
+                trigger_message=trigger_message,
+                model_reply=model_reply,
+                notes=notes
+            )
+        except Exception as e:
+            logger.error(f"记录动态状态快照失败: {e}")
+
+    def _apply_dynamic_state_rules(self, state, latest_user_message, relation_desc="", proactive=False):
+        if not state:
+            return state, []
+
+        adjusted = dict(state)
+        notes = []
+        text = (latest_user_message or "").strip()
+        lower = text.lower()
+
+        def bump(key, delta, low=0.0, high=1.0):
+            adjusted[key] = round(self._clamp(float(adjusted.get(key, 0.0)) + delta, low, high), 2)
+
+        short_cold = len(text) <= 4 and text in {"哦", "噢", "额", "行", "随便", "不知道", "再说", "嗯", "。。"}
+        if short_cold:
+            adjusted["scene_label"] = "敷衍"
+            adjusted["emotion_label"] = "有点不爽"
+            adjusted["user_affect"] = "敷衍"
+            adjusted["repair_status"] = "待安抚"
+            adjusted["carryover_summary"] = "被敷衍了一下 心里有点刺"
+            adjusted["unresolved_need"] = "想被认真接住"
+            bump("emotion_intensity", 0.14, 0.18, 0.95)
+            bump("warmth_bias", -0.12)
+            bump("initiative_bias", -0.08)
+            notes.append("检测到短促敷衍，降低热度并挂起待安抚状态")
+
+        if any(k in text for k in ["想你", "抱抱", "亲亲", "爱你", "陪我", "老婆", "宝贝"]):
+            adjusted["scene_label"] = "亲密"
+            adjusted["emotion_label"] = "变软"
+            adjusted["user_affect"] = "靠近"
+            adjusted["repair_status"] = "正在变软"
+            adjusted["carryover_summary"] = "被他往前抱了一下 心口软了点"
+            adjusted["unresolved_need"] = "还想再多黏一会儿"
+            bump("emotion_intensity", 0.08, 0.18, 0.95)
+            bump("warmth_bias", 0.14)
+            bump("initiative_bias", 0.10)
+            notes.append("检测到亲密表达，提高热度与主动度")
+
+        if any(k in text for k in ["对不起", "抱歉", "我错了", "别生气", "错啦"]):
+            adjusted["scene_label"] = "修复"
+            adjusted["user_affect"] = "在哄"
+            adjusted["emotion_label"] = "嘴硬但松动"
+            adjusted["repair_status"] = "正在变软"
+            adjusted["carryover_summary"] = "他开始哄了 气还没散完 但没刚才那么硬"
+            adjusted["unresolved_need"] = "想看他是不是认真"
+            bump("warmth_bias", 0.10)
+            bump("initiative_bias", 0.04)
+            notes.append("检测到道歉/安抚，修复状态回暖")
+
+        if any(k in lower for k in ["晚安", "睡了", "睡觉", "困死", "先睡"]):
+            adjusted["scene_label"] = "收尾"
+            adjusted["user_affect"] = "疲惫"
+            adjusted["inhibition_label"] = "别拉太长 让他早点休息"
+            adjusted["reply_style"] = "更短一点 软一点 别拉着继续聊"
+            adjusted["carryover_summary"] = "这轮该轻一点收住"
+            notes.append("检测到收尾场景，压低输出长度")
+
+        if any(k in text for k in ["帮我", "怎么办", "怎么弄", "教我", "不会", "搞不定"]):
+            adjusted["scene_label"] = "求助"
+            adjusted["user_affect"] = "求助"
+            adjusted["motivation_label"] = "先接住他 再认真帮一下"
+            adjusted["reply_style"] = "先一句接情绪 再给简洁有用的话 别像客服"
+            bump("warmth_bias", 0.06)
+            notes.append("检测到求助场景，提高认真帮忙倾向")
+
+        if any(k in text for k in ["和谁", "别的女生", "别人也这样", "她是谁", "你是不是"]):
+            adjusted["scene_label"] = "试探"
+            adjusted["emotion_label"] = "轻微吃醋"
+            adjusted["user_affect"] = "试探"
+            adjusted["carryover_summary"] = "有点在意这件事 语气会带刺一点"
+            adjusted["unresolved_need"] = "想确认自己是不是被偏爱"
+            bump("emotion_intensity", 0.10, 0.18, 0.95)
+            notes.append("检测到试探/比较话题，抬高醋意")
+
+        if proactive:
+            adjusted["last_trigger_source"] = "主动发言"
+        elif text:
+            adjusted["last_trigger_source"] = "用户新消息"
+
+        if relation_desc:
+            if "Security(Very Low)" in relation_desc or "Security(Low)" in relation_desc:
+                adjusted["hidden_expectation"] = "希望他多给一点确定感和偏爱"
+                notes.append("长期安全感偏低，隐性期待转向确定感")
+            if "Jealousy(Very High)" in relation_desc or "Jealousy(High)" in relation_desc:
+                if adjusted.get("scene_label") == "日常":
+                    adjusted["scene_label"] = "试探"
+                notes.append("长期嫉妒位较高，场景更容易滑向试探")
+
+        return adjusted, notes
+
     def _derive_carryover_state(self, existing_state, now_dt):
         if not existing_state:
             return {}
@@ -725,6 +843,12 @@ class ChatAI:
             raw_text = response.text.strip() if response and response.text else ""
             payload = self._safe_json_loads(raw_text) if raw_text else {}
             normalized = self._normalize_dynamic_state(payload, fallback=carryover_state or existing_state)
+            normalized, rule_notes = self._apply_dynamic_state_rules(
+                normalized,
+                latest_user_message,
+                relation_desc=relationship_context,
+                proactive=False
+            )
             self.db.upsert_dynamic_state(
                 self.character_id,
                 normalized["scene_label"],
@@ -744,11 +868,103 @@ class ChatAI:
                 normalized["repair_status"]
             )
             self.dynamic_state = normalized
+            self._persist_dynamic_state_snapshot(
+                normalized,
+                source_kind="pre_reply",
+                trigger_message=latest_user_message,
+                notes="；".join(rule_notes) if rule_notes else "pre_reply_state"
+            )
             return normalized
         except Exception as e:
             logger.error(f"刷新动态心智状态失败: {e}")
             self.dynamic_state = self._normalize_dynamic_state({}, fallback=carryover_state or existing_state)
             return self.dynamic_state
+
+    def _update_post_reply_state(self, trigger_message, model_reply, base_state, turn_plan=None, proactive=False):
+        if not self.character_id or not base_state:
+            return base_state
+
+        state = dict(base_state)
+        text = (model_reply or "").strip()
+        user_text = (trigger_message or "").strip()
+        notes = []
+
+        if not text and not self.pending_output_image:
+            return state
+
+        if turn_plan:
+            state["reply_style"] = self._clean_state_text(
+                turn_plan.get("notes"),
+                state.get("reply_style") or "短句 口语化 别解释太满 带点嘴硬和留白",
+                limit=180
+            )
+
+        if any(k in text for k in ["哼", "才没有", "随你", "自己想"]):
+            state["carryover_summary"] = "嘴上还是硬的 但其实在等他继续接"
+            state["repair_status"] = state.get("repair_status") or "有点别扭"
+            notes.append("回复里保留嘴硬尾巴")
+
+        if any(k in text for k in ["晚安", "早点睡", "快去睡", "休息"]):
+            state["scene_label"] = "收尾"
+            state["carryover_summary"] = "这轮收住了 但心还是贴着的"
+            state["inhibition_label"] = "别再把话题拉长"
+            notes.append("回复后进入收尾状态")
+
+        if any(k in user_text for k in ["对不起", "抱歉", "我错了", "别生气", "错啦"]) and any(
+            k in text for k in ["行吧", "这次算了", "原谅你", "勉强", "下不为例"]
+        ):
+            state["repair_status"] = "已被哄好"
+            state["emotion_label"] = "嘴硬但好了"
+            state["carryover_summary"] = "嘴上没全松 但其实已经被哄住了"
+            state["unresolved_need"] = "想再被哄两句"
+            state["warmth_bias"] = round(self._clamp(float(state.get("warmth_bias", 0.58)) + 0.08, 0.0, 1.0), 2)
+            notes.append("识别到修复完成")
+
+        if turn_plan and turn_plan.get("should_offer_help"):
+            state["carryover_summary"] = "已经伸手帮他了 心里会更偏向继续接住"
+            state["warmth_bias"] = round(self._clamp(float(state.get("warmth_bias", 0.58)) + 0.04, 0.0, 1.0), 2)
+            notes.append("本轮提供帮助后，热度略升")
+
+        if proactive:
+            state["initiative_bias"] = round(self._clamp(float(state.get("initiative_bias", 0.46)) - 0.03, 0.0, 1.0), 2)
+            state["carryover_summary"] = self._clean_state_text(
+                state.get("carryover_summary"),
+                "主动伸了一次手 现在等他接",
+                limit=180
+            )
+            notes.append("主动发言后略微回收主动度")
+
+        state["last_trigger_source"] = "主动发言后余波" if proactive else "回复后余波"
+        try:
+            self.db.upsert_dynamic_state(
+                self.character_id,
+                state["scene_label"],
+                state["emotion_label"],
+                state["emotion_intensity"],
+                state["motivation_label"],
+                state["inhibition_label"],
+                state["hidden_expectation"],
+                state["last_user_intent"],
+                state["user_affect"],
+                state["unresolved_need"],
+                state["carryover_summary"],
+                state["reply_style"],
+                state["warmth_bias"],
+                state["initiative_bias"],
+                state["last_trigger_source"],
+                state["repair_status"]
+            )
+            self.dynamic_state = state
+            self._persist_dynamic_state_snapshot(
+                state,
+                source_kind="post_reply" if not proactive else "post_proactive",
+                trigger_message=trigger_message,
+                model_reply=model_reply,
+                notes="；".join(notes) if notes else "post_reply_state"
+            )
+        except Exception as e:
+            logger.error(f"写入回合后余波状态失败: {e}")
+        return state
 
     def _plan_turn_response(self, latest_user_message, dynamic_state, relation_desc="", image_requested=False, proactive=False):
         if not latest_user_message.strip():
@@ -1269,6 +1485,13 @@ class ChatAI:
             )
             # 同样更新内存中的最后互动时间，确保 30 分钟判断更精准
             self.last_message_timestamp = datetime.datetime.now()
+            self._update_post_reply_state(
+                trigger_message=message,
+                model_reply=save_text,
+                base_state=dynamic_state,
+                turn_plan=turn_plan,
+                proactive=False
+            )
         
         return response_text, image_path
 
@@ -1284,6 +1507,18 @@ class ChatAI:
 
         # 触发提示：以特殊标记开头，便于事后从 chat history 中识别并移除
         current_state = self.dynamic_state or (self.db.get_dynamic_state(self.character_id) if self.character_id else None)
+        if current_state:
+            current_state, proactive_rule_notes = self._apply_dynamic_state_rules(
+                current_state,
+                trigger_hint,
+                proactive=True
+            )
+            self._persist_dynamic_state_snapshot(
+                current_state,
+                source_kind="pre_proactive",
+                trigger_message=trigger_hint,
+                notes="；".join(proactive_rule_notes) if proactive_rule_notes else "pre_proactive_state"
+            )
         proactive_plan = self._plan_turn_response(
             trigger_hint,
             current_state,
@@ -1356,6 +1591,13 @@ class ChatAI:
                 media_type='image/jpeg' if image_path else None
             )
             self.last_message_timestamp = datetime.datetime.now()
+            self._update_post_reply_state(
+                trigger_message=trigger_hint,
+                model_reply=response_text if response_text.strip() else "[AI发送了一张图片]",
+                base_state=current_state,
+                turn_plan=proactive_plan,
+                proactive=True
+            )
 
         return response_text, image_path
 

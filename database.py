@@ -770,6 +770,69 @@ class Database:
         except Exception as e:
             conn.rollback()
             logging.warning(f"写入动态心智状态失败: {e}")
+
+    def insert_dynamic_state_history(
+        self,
+        character_id,
+        source_kind,
+        scene_label,
+        emotion_label,
+        emotion_intensity,
+        motivation_label,
+        inhibition_label,
+        hidden_expectation,
+        last_user_intent,
+        user_affect,
+        unresolved_need,
+        carryover_summary,
+        reply_style,
+        warmth_bias,
+        initiative_bias,
+        last_trigger_source,
+        repair_status,
+        trigger_message=None,
+        model_reply=None,
+        notes=None
+    ):
+        """记录动态心智状态快照历史"""
+        conn = self.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO character_dynamic_state_history
+                       (character_id, source_kind, scene_label, emotion_label, emotion_intensity,
+                        motivation_label, inhibition_label, hidden_expectation, last_user_intent,
+                        user_affect, unresolved_need, carryover_summary, reply_style,
+                        warmth_bias, initiative_bias, last_trigger_source, repair_status,
+                        trigger_message, model_reply, notes)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        character_id,
+                        source_kind,
+                        scene_label,
+                        emotion_label,
+                        emotion_intensity,
+                        motivation_label,
+                        inhibition_label,
+                        hidden_expectation,
+                        last_user_intent,
+                        user_affect,
+                        unresolved_need,
+                        carryover_summary,
+                        reply_style,
+                        warmth_bias,
+                        initiative_bias,
+                        last_trigger_source,
+                        repair_status,
+                        trigger_message,
+                        model_reply,
+                        notes
+                    )
+                )
+                conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logging.warning(f"写入动态状态历史失败: {e}")
     # --- 提醒任务方法开始 ---
 
     def add_reminder(self, character_id, user_id, task_content, remind_at, source_type='user_request'):
