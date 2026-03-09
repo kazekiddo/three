@@ -1614,8 +1614,6 @@ class ChatAI:
         if episodic_text:
             augmented_message += episodic_text
         if dynamic_state:
-            # 延迟 100ms 让 LLM 先思考
-            time.sleep(0.1)
             augmented_message += self._build_dynamic_state_prompt(dynamic_state, turn_plan=None)
 
         # 轻触发图片偏好：命中视觉化意图时，优先让模型调用图片工具
