@@ -698,6 +698,92 @@ class ChatAI:
             ),
         }
 
+    def _prepare_local_pre_reply_state(self, latest_user_message: str, relation_desc: str = "", proactive=False):
+        """单次回复前：仅用本地规则做一次基础状态修正，避免额外模型调用。"""
+        now_dt = datetime.datetime.now()
+        existing_state = self.db.get_dynamic_state(self.character_id) if self.character_id else None
+        existing_state = existing_state or self.dynamic_state or {}
+        carryover_state = self._derive_carryover_state(existing_state, now_dt)
+        normalized = self._normalize_dynamic_state({}, fallback=carryover_state or existing_state)
+        normalized, rule_notes = self._apply_dynamic_state_rules(
+            normalized,
+            latest_user_message,
+            relation_desc=relation_desc or "",
+            proactive=proactive
+        )
+        return normalized, rule_notes
+
+    def _build_single_call_state_patch_instruction(self):
+        return (
+            "\n\n[系统附加输出协议]\n"
+            "你最终只能输出一个 JSON 对象，不要输出 markdown，不要输出代码块。\n"
+            "格式必须是：\n"
+            "{"
+            "\"reply\":\"给用户的自然回复\","
+            "\"state_patch\":{"
+            "\"scene_label\":\"...\","
+            "\"emotion_label\":\"...\","
+            "\"repair_status\":\"...\","
+            "\"carryover_summary\":\"...\","
+            "\"warmth_bias\":0.0,"
+            "\"initiative_bias\":0.0"
+            "}"
+            "}\n"
+            "规则：\n"
+            "1) reply 必须是最终给用户看的内容，自然口语化。\n"
+            "2) state_patch 仅允许包含这 6 个键，可按需部分返回；不要返回其他键。\n"
+            "3) warmth_bias 和 initiative_bias 必须在 0.0~1.0。\n"
+            "4) 即使你调用了工具（如 generate_image/register_reminder），最终输出仍必须是上述 JSON。"
+        )
+
+    def _extract_json_payload(self, text: str):
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return {}
+        try:
+            return self._safe_json_loads(cleaned)
+        except Exception:
+            pass
+
+        # 容错：尝试从文本中提取最外层 JSON 对象
+        first = cleaned.find("{")
+        last = cleaned.rfind("}")
+        if first != -1 and last != -1 and last > first:
+            snippet = cleaned[first:last + 1]
+            try:
+                return self._safe_json_loads(snippet)
+            except Exception:
+                return {}
+        return {}
+
+    def _merge_state_patch(self, base_state, state_patch):
+        merged = dict(base_state or {})
+        if not isinstance(state_patch, dict):
+            return self._normalize_dynamic_state(merged, fallback=base_state or {})
+
+        text_limits = {
+            "scene_label": 50,
+            "emotion_label": 50,
+            "repair_status": 80,
+            "carryover_summary": 180,
+        }
+        for key, limit in text_limits.items():
+            if key in state_patch:
+                merged[key] = self._clean_state_text(state_patch.get(key), merged.get(key, ""), limit=limit)
+
+        if "warmth_bias" in state_patch:
+            merged["warmth_bias"] = self._normalize_float(
+                state_patch.get("warmth_bias"),
+                fallback=float(merged.get("warmth_bias", 0.58))
+            )
+        if "initiative_bias" in state_patch:
+            merged["initiative_bias"] = self._normalize_float(
+                state_patch.get("initiative_bias"),
+                fallback=float(merged.get("initiative_bias", 0.46))
+            )
+
+        return self._normalize_dynamic_state(merged, fallback=base_state or {})
+
     def _persist_dynamic_state_snapshot(self, state, source_kind, trigger_message=None, model_reply=None, notes=None):
         if not self.character_id or not state:
             return
@@ -1340,7 +1426,7 @@ class ChatAI:
         relation_desc = ""
         compact_relation_desc = ""
         dynamic_state = self.dynamic_state
-        turn_plan = None
+        pre_rule_notes = []
         
         # 处理时间连续性感知架构 (判断与上一条用户消息的时间差)
         if self.character_id:
@@ -1424,12 +1510,39 @@ class ChatAI:
                 logging.getLogger(__name__).error(f"检索记忆失败: {e}")
 
         if self.character_id:
-            dynamic_state, turn_plan = self._infer_state_and_plan(
+            dynamic_state, pre_rule_notes = self._prepare_local_pre_reply_state(
                 message,
                 relation_desc=compact_relation_desc,
-                image_requested=self._should_prefer_image_response(message, image_data=image_data),
                 proactive=False
             )
+            try:
+                self.db.upsert_dynamic_state(
+                    self.character_id,
+                    dynamic_state["scene_label"],
+                    dynamic_state["emotion_label"],
+                    dynamic_state["emotion_intensity"],
+                    dynamic_state["motivation_label"],
+                    dynamic_state["inhibition_label"],
+                    dynamic_state["hidden_expectation"],
+                    dynamic_state["last_user_intent"],
+                    dynamic_state["user_affect"],
+                    dynamic_state["unresolved_need"],
+                    dynamic_state["carryover_summary"],
+                    dynamic_state["reply_style"],
+                    dynamic_state["warmth_bias"],
+                    dynamic_state["initiative_bias"],
+                    dynamic_state["last_trigger_source"],
+                    dynamic_state["repair_status"]
+                )
+                self.dynamic_state = dynamic_state
+                self._persist_dynamic_state_snapshot(
+                    dynamic_state,
+                    source_kind="pre_reply_local",
+                    trigger_message=message,
+                    notes="；".join(pre_rule_notes) if pre_rule_notes else "pre_reply_local_rules"
+                )
+            except Exception as e:
+                logger.error(f"写入本地预修正状态失败: {e}")
 
         # 拼接最终提交给 LLM 的增强上下文：
         # 1. 临时系统时间锚点 (决定了流逝感)
@@ -1446,7 +1559,7 @@ class ChatAI:
         if dynamic_state:
             # 延迟 100ms 让 LLM 先思考
             time.sleep(0.1)
-            augmented_message += self._build_dynamic_state_prompt(dynamic_state, turn_plan=turn_plan)
+            augmented_message += self._build_dynamic_state_prompt(dynamic_state, turn_plan=None)
 
         # 轻触发图片偏好：命中视觉化意图时，优先让模型调用图片工具
         if self._should_prefer_image_response(message, image_data=image_data):
@@ -1478,6 +1591,7 @@ class ChatAI:
                 "\n\n[系统附加联网信息：以下是本轮联网检索摘要，请优先使用有来源的事实作答]\n"
                 f"{web_search_text}"
             )
+        augmented_message += self._build_single_call_state_patch_instruction()
 
         # 重置待处理图片
         self.pending_output_image = None
@@ -1501,6 +1615,16 @@ class ChatAI:
         response_text = re.sub(r'\[SYS_PROACTIVE[^\]]*\]', '', response_text)
         response_text = re.sub(r'\[\u7cfb\u7edf\u9644\u52a0[^\]]*\]', '', response_text)
         response_text = response_text.strip()
+
+        payload = self._extract_json_payload(response_text)
+        state_patch = payload.get("state_patch", {}) if isinstance(payload, dict) else {}
+        user_reply_text = ""
+        if isinstance(payload, dict):
+            reply_candidate = payload.get("reply")
+            if isinstance(reply_candidate, str):
+                user_reply_text = reply_candidate.strip()
+        if not user_reply_text and not isinstance(payload, dict):
+            user_reply_text = response_text
         
         # 从 chat history 中清除系统注入块，避免 token 累积
         # automatic_function_calling 会在末尾追加 role='user' 的 function_response，
@@ -1524,10 +1648,43 @@ class ChatAI:
         image_path = self.pending_output_image
         if proactive_image_forced and image_path:
             self.last_proactive_image_timestamp = datetime.datetime.now()
+
+        merged_state = dynamic_state
+        if self.character_id and dynamic_state:
+            try:
+                merged_state = self._merge_state_patch(dynamic_state, state_patch)
+                self.db.upsert_dynamic_state(
+                    self.character_id,
+                    merged_state["scene_label"],
+                    merged_state["emotion_label"],
+                    merged_state["emotion_intensity"],
+                    merged_state["motivation_label"],
+                    merged_state["inhibition_label"],
+                    merged_state["hidden_expectation"],
+                    merged_state["last_user_intent"],
+                    merged_state["user_affect"],
+                    merged_state["unresolved_need"],
+                    merged_state["carryover_summary"],
+                    merged_state["reply_style"],
+                    merged_state["warmth_bias"],
+                    merged_state["initiative_bias"],
+                    merged_state["last_trigger_source"],
+                    merged_state["repair_status"]
+                )
+                self.dynamic_state = merged_state
+                self._persist_dynamic_state_snapshot(
+                    merged_state,
+                    source_kind="pre_reply_patch_merge",
+                    trigger_message=message,
+                    model_reply=user_reply_text,
+                    notes="single_call_state_patch_merge"
+                )
+            except Exception as e:
+                logger.error(f"合并状态补丁失败: {e}")
         
         # 保存AI回复（只有非空时才保存）
-        if self.character_id and (response_text.strip() or image_path):
-            save_text = response_text if response_text.strip() else "[AI发送了一张图片]"
+        if self.character_id and (user_reply_text.strip() or image_path):
+            save_text = user_reply_text if user_reply_text.strip() else "[AI发送了一张图片]"
             self.db.save_message(
                 self.character_id, 'model', save_text, 
                 model=self.model,
@@ -1539,12 +1696,12 @@ class ChatAI:
             self._update_post_reply_state(
                 trigger_message=message,
                 model_reply=save_text,
-                base_state=dynamic_state,
-                turn_plan=turn_plan,
+                base_state=merged_state,
+                turn_plan=None,
                 proactive=False
             )
         
-        return response_text, image_path
+        return user_reply_text, image_path
 
     def send_proactive_message(self, trigger_hint: str):
         """AI 主动发起一条消息（非用户触发）。
