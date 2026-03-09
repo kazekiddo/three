@@ -415,12 +415,8 @@ class ChatAI:
             self.system_instruction = system_instruction + image_constraint + reminder_constraint
             config['system_instruction'] = self.system_instruction
         config['tools'] = self.tools
-
-        self.chat = self.client.chats.create(
-            model=model,
-            config=config,
-            history=history
-        )
+        self.runtime_config = config
+        self.base_history = list(history)
 
     def _ensure_proactive_day_state(self, now_dt: datetime.datetime):
         today = now_dt.date()
@@ -846,25 +842,49 @@ class ChatAI:
 
         return carry
 
-    def _infer_state_and_plan(self, latest_user_message: str, relation_desc: str = "", image_requested=False, proactive=False):
+    def _merge_state_patch(self, base_state, state_patch):
+        merged = dict(base_state or {})
+        if isinstance(state_patch, dict):
+            merged.update({k: v for k, v in state_patch.items() if v is not None})
+        return self._normalize_dynamic_state(merged, fallback=base_state or {})
+
+    def _generate_reply_and_state_patch(self, latest_user_message: str, relation_desc: str = "", image_requested=False, proactive=False):
         if not self.character_id or not latest_user_message.strip():
-            return self.dynamic_state, {}
+            return "", self.dynamic_state
 
         now_dt = datetime.datetime.now()
         existing_state = self.db.get_dynamic_state(self.character_id) or self.dynamic_state or {}
         carryover_state = self._derive_carryover_state(existing_state, now_dt)
-        recent_dialogue = self._recent_dialogue_excerpt(limit=8)
+        pre_state = self._normalize_dynamic_state(carryover_state or existing_state, fallback=existing_state)
+        pre_state, rule_notes = self._apply_dynamic_state_rules(
+            pre_state,
+            latest_user_message,
+            relation_desc=relation_desc.strip() if relation_desc else "",
+            proactive=proactive
+        )
+        recent_dialogue = self._recent_dialogue_excerpt()
         now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
         relationship_context = relation_desc.strip() if relation_desc else "暂无额外关系上下文"
-        existing_state_json = json.dumps(existing_state, ensure_ascii=False, default=str)
-        carryover_state_json = json.dumps(carryover_state, ensure_ascii=False, default=str)
+        state_json = json.dumps({
+            "scene_label": pre_state.get("scene_label"),
+            "emotion_label": pre_state.get("emotion_label"),
+            "emotion_intensity": pre_state.get("emotion_intensity"),
+            "motivation_label": pre_state.get("motivation_label"),
+            "inhibition_label": pre_state.get("inhibition_label"),
+            "hidden_expectation": pre_state.get("hidden_expectation"),
+            "user_affect": pre_state.get("user_affect"),
+            "repair_status": pre_state.get("repair_status"),
+            "warmth_bias": pre_state.get("warmth_bias"),
+            "initiative_bias": pre_state.get("initiative_bias"),
+        }, ensure_ascii=False, default=str)
 
         prompt = (
             f"当前时间（Asia/Shanghai）: {now_str}\n"
-            "你是角色的【短期心智状态引擎 + 回合表达导演】。你的任务不是直接代替角色回复，而是先判断她此刻的内在状态，再决定这轮该怎么回。\n"
-            "请输出一个 JSON 对象，包含 state 和 plan 两部分：\n"
+            "你是角色本人。请直接产出这轮真正要发给对方的话，并附带一个极简 state_patch，用于更新这轮之后的短期状态。\n"
+            "请输出一个 JSON 对象：\n"
             "{"
-            "\"state\":{"
+            "\"reply\":\"...\","
+            "\"state_patch\":{"
             "\"scene_label\":\"...\","
             "\"emotion_label\":\"...\","
             "\"emotion_intensity\":0.0,"
@@ -880,35 +900,18 @@ class ChatAI:
             "\"initiative_bias\":0.0,"
             "\"last_trigger_source\":\"...\","
             "\"repair_status\":\"...\""
-            "},"
-            "\"plan\":{"
-            "\"response_mode\":\"...\","
-            "\"tone\":\"...\","
-            "\"goal\":\"...\","
-            "\"should_ask_question\":true,"
-            "\"should_tease\":false,"
-            "\"should_offer_help\":false,"
-            "\"should_reference_memory\":false,"
-            "\"should_be_extra_brief\":true,"
-            "\"max_sentences\":2,"
-            "\"warmth_level\":0.0,"
-            "\"initiative_level\":0.0,"
-            "\"notes\":\"...\""
             "}"
             "}\n"
             "约束：\n"
-            "1) state.scene_label 必须是简短场景标签，如 日常/撒娇/求助/汇报/邀约/冲突/修复/试探/分享/敷衍。\n"
-            "2) state.emotion_label 用简短中文，如 平静/开心/委屈/不安/吃醋/烦躁/想撒娇。\n"
-            "3) state.emotion_intensity、state.warmth_bias、state.initiative_bias、plan.warmth_level、plan.initiative_level 都在 0.0 到 1.0 之间。\n"
-            "4) state.reply_style 只描述表达方式，不能直接代写台词。\n"
-            "5) plan.response_mode 只能是 接住/安抚/调情/吐槽/认真帮忙/轻微吃醋/追问/冷一点/分享/提醒。\n"
-            "6) plan.goal 只写这轮唯一主目标；plan.max_sentences 取 1 到 4，大多数情况不超过 2。\n"
-            "7) plan.should_offer_help 只有用户在求助、卡住、焦虑或明确要方案时才为 true。\n"
-            "8) plan.should_tease 只在气氛安全时使用。\n"
-            "9) 只输出 JSON，不要 markdown，不要解释。\n\n"
-            f"已有短期状态：{existing_state_json}\n\n"
-            f"按时间衰减后的延续状态：{carryover_state_json}\n\n"
-            f"关系上下文：\n{relationship_context}\n\n"
+            "1) reply 只写角色真正会发出去的话，不要写旁白，不要解释 JSON。\n"
+            "2) state_patch 只写这轮后真正变化的短期状态；不想改的字段可以省略。\n"
+            "3) state_patch.scene_label 用简短标签，如 日常/撒娇/求助/汇报/邀约/冲突/修复/试探/分享/敷衍/收尾。\n"
+            "4) state_patch.emotion_intensity、warmth_bias、initiative_bias 在 0.0 到 1.0 之间。\n"
+            "5) reply 要短句、口语化、像真人聊天，不要像助手，不要解释过满。\n"
+            "6) 如需图片，必须通过工具调用；如明确答应提醒，必须通过工具调用。\n"
+            "7) 只输出 JSON，不要 markdown，不要额外解释。\n\n"
+            f"当前短期状态：{state_json}\n\n"
+            f"关系上下文：\n{relationship_context[:220]}\n\n"
             f"是否用户索图：{'是' if image_requested else '否'}\n"
             f"是否主动发言：{'是' if proactive else '否'}\n\n"
             f"最近对话：\n{recent_dialogue or '暂无'}\n\n"
@@ -926,13 +929,8 @@ class ChatAI:
             )
             raw_text = response.text.strip() if response and response.text else ""
             payload = self._safe_json_loads(raw_text) if raw_text else {}
-            normalized = self._normalize_dynamic_state(payload.get("state"), fallback=carryover_state or existing_state)
-            normalized, rule_notes = self._apply_dynamic_state_rules(
-                normalized,
-                latest_user_message,
-                relation_desc=relationship_context,
-                proactive=proactive
-            )
+            reply_text = self._clean_state_text(payload.get("reply"), "", limit=2000)
+            normalized = self._merge_state_patch(pre_state, payload.get("state_patch"))
             self.db.upsert_dynamic_state(
                 self.character_id,
                 normalized["scene_label"],
@@ -956,63 +954,14 @@ class ChatAI:
                 normalized,
                 source_kind="pre_proactive" if proactive else "pre_reply",
                 trigger_message=latest_user_message,
+                model_reply=reply_text,
                 notes="；".join(rule_notes) if rule_notes else ("pre_proactive_state" if proactive else "pre_reply_state")
             )
-            state_json = json.dumps({
-                "scene_label": normalized.get("scene_label"),
-                "emotion_label": normalized.get("emotion_label"),
-                "emotion_intensity": normalized.get("emotion_intensity"),
-                "motivation_label": normalized.get("motivation_label"),
-                "user_affect": normalized.get("user_affect"),
-                "repair_status": normalized.get("repair_status"),
-                "warmth_bias": normalized.get("warmth_bias"),
-                "initiative_bias": normalized.get("initiative_bias"),
-            }, ensure_ascii=False, default=str)
-            plan_payload = payload.get("plan") if isinstance(payload, dict) else {}
-            if not isinstance(plan_payload, dict):
-                plan_payload = {}
-            try:
-                max_sentences = int(plan_payload.get("max_sentences", 2))
-            except Exception:
-                max_sentences = 2
-            plan = {
-                "response_mode": self._clean_state_text(plan_payload.get("response_mode"), "接住", limit=40),
-                "tone": self._clean_state_text(plan_payload.get("tone"), "嘴硬里带一点软", limit=60),
-                "goal": self._clean_state_text(plan_payload.get("goal"), "先接住对方 再保持点亲密感", limit=100),
-                "should_ask_question": bool(plan_payload.get("should_ask_question", False)),
-                "should_tease": bool(plan_payload.get("should_tease", False)),
-                "should_offer_help": bool(plan_payload.get("should_offer_help", False)),
-                "should_reference_memory": bool(plan_payload.get("should_reference_memory", False)),
-                "should_be_extra_brief": bool(plan_payload.get("should_be_extra_brief", True)),
-                "max_sentences": max(1, min(max_sentences, 4)),
-                "warmth_level": self._normalize_float(
-                    plan_payload.get("warmth_level", normalized.get("warmth_bias", 0.58)),
-                    fallback=float(normalized.get("warmth_bias", 0.58))
-                ),
-                "initiative_level": self._normalize_float(
-                    plan_payload.get("initiative_level", normalized.get("initiative_bias", 0.46)),
-                    fallback=float(normalized.get("initiative_bias", 0.46))
-                ),
-                "notes": self._clean_state_text(plan_payload.get("notes"), "别太像助手", limit=120)
-            }
-            return normalized, plan
+            return reply_text, normalized
         except Exception as e:
-            logger.error(f"推断状态与决策失败: {e}")
-            self.dynamic_state = self._normalize_dynamic_state({}, fallback=carryover_state or existing_state)
-            return self.dynamic_state, {
-                "response_mode": "接住",
-                "tone": "嘴硬里带一点软",
-                "goal": "先接住对方 再保持点亲密感",
-                "should_ask_question": False,
-                "should_tease": False,
-                "should_offer_help": False,
-                "should_reference_memory": False,
-                "should_be_extra_brief": True,
-                "max_sentences": 2,
-                "warmth_level": float(self.dynamic_state.get("warmth_bias", 0.58)),
-                "initiative_level": float(self.dynamic_state.get("initiative_bias", 0.46)),
-                "notes": "别太像助手"
-            }
+            logger.error(f"生成回复与状态补丁失败: {e}")
+            self.dynamic_state = pre_state
+            return "", pre_state
 
     def _update_post_reply_state(self, trigger_message, model_reply, base_state, turn_plan=None, proactive=False):
         if not self.character_id or not base_state:
@@ -1318,19 +1267,8 @@ class ChatAI:
                 logger.error(f"整点自动安排情境关怀提醒失败: {e}")
             
     def clear_history(self):
-        """每天凌晨清空一次内存中的长对话列表，同时保留工具能力"""
-        logger.info(f"正在清空角色 {self.character_id} 的短期对话感知缓冲...")
-        
-        config = {'automatic_function_calling': {}}
-        if self.system_instruction:
-            config['system_instruction'] = self.system_instruction
-        config['tools'] = self.tools
-
-        self.chat = self.client.chats.create(
-            model=self.model,
-            config=config,
-            history=self.base_history
-        )
+        """显式生成模式下无需维护持久 chat session"""
+        logger.info(f"角色 {self.character_id} 运行于显式生成模式，无需清空 chat session")
     
     def send_message(self, message, image_data=None, image_mime_type=None, media_path=None):
         """发送消息并获取回复"""
@@ -1423,7 +1361,7 @@ class ChatAI:
                 logging.getLogger(__name__).error(f"检索记忆失败: {e}")
 
         if self.character_id:
-            dynamic_state, turn_plan = self._infer_state_and_plan(
+            response_text, dynamic_state = self._generate_reply_and_state_patch(
                 message,
                 relation_desc=compact_relation_desc,
                 image_requested=self._should_prefer_image_response(message, image_data=image_data),
@@ -1443,7 +1381,7 @@ class ChatAI:
         if episodic_text:
             augmented_message += episodic_text
         if dynamic_state:
-            augmented_message += self._build_dynamic_state_prompt(dynamic_state, turn_plan=turn_plan)
+            augmented_message += self._build_dynamic_state_prompt(dynamic_state, turn_plan=None)
 
         # 轻触发图片偏好：命中视觉化意图时，优先让模型调用图片工具
         if self._should_prefer_image_response(message, image_data=image_data):
@@ -1476,21 +1414,7 @@ class ChatAI:
                 f"{web_search_text}"
             )
 
-        # 重置待处理图片
-        self.pending_output_image = None
-
-        # 构造多模态消息 Parts
-        message_parts = [augmented_message]
-        if image_data:
-            message_parts.append(types.Part.from_bytes(data=image_data, mime_type=image_mime_type))
-
-        # 获取AI回复（automatic_function_calling 在 send_message 内部自动完成，response 是最终响应）
-        response = self.chat.send_message(message_parts)
-        response_text = ""
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.text and not part.text.strip().startswith(("THOUGHT", "THINK")):
-                    response_text += part.text
+        # 单次调用模式下，reply 已经由 _generate_reply_and_state_patch 产出
         # 清理模型生成图片时附带的内部标记文本
         response_text = response_text.replace("Here is the original image:", "")
         # 清理 AI 可能模仿输出的系统标记（它从 chat history 里学到的）
@@ -1498,24 +1422,6 @@ class ChatAI:
         response_text = re.sub(r'\[SYS_PROACTIVE[^\]]*\]', '', response_text)
         response_text = re.sub(r'\[\u7cfb\u7edf\u9644\u52a0[^\]]*\]', '', response_text)
         response_text = response_text.strip()
-        
-        # 从 chat history 中清除系统注入块，避免 token 累积
-        # automatic_function_calling 会在末尾追加 role='user' 的 function_response，
-        # 因此不能只清理“最后一条 user”，要扫描所有 user 文本 part。
-        try:
-            markers = ['[系统附加', '[Deep Relationship', '[系统时间感知']
-            for content in getattr(self.chat, '_curated_history', []):
-                if getattr(content, 'role', None) != 'user':
-                    continue
-                for part in getattr(content, 'parts', []):
-                    text = getattr(part, 'text', None)
-                    if not text:
-                        continue
-                    cut_points = [text.find(tag) for tag in markers if tag in text]
-                    if cut_points:
-                        part.text = text[:min(cut_points)].rstrip()
-        except Exception:
-            pass
         
         # 提取生成图片的路径（如果有的话）
         image_path = self.pending_output_image
@@ -1537,7 +1443,7 @@ class ChatAI:
                 trigger_message=message,
                 model_reply=save_text,
                 base_state=dynamic_state,
-                turn_plan=turn_plan,
+                turn_plan=None,
                 proactive=False
             )
         
@@ -1555,56 +1461,20 @@ class ChatAI:
 
         # 触发提示：以特殊标记开头，便于事后从 chat history 中识别并移除
         current_state = self.dynamic_state or (self.db.get_dynamic_state(self.character_id) if self.character_id else None)
-        current_state, proactive_plan = self._infer_state_and_plan(
+        response_text, current_state = self._generate_reply_and_state_patch(
             trigger_hint,
             relation_desc=self._build_compact_relationship_context(),
             image_requested=False,
             proactive=True
         )
-        dynamic_state_prompt = self._build_dynamic_state_prompt(
-            current_state,
-            turn_plan=proactive_plan
-        )
-        trigger_msg = (
-            f"[SYS_PROACTIVE] 现在是 {current_time_str}，{trigger_hint}"
-            "请你以角色身份，自然地主动给思远发一条消息。"
-            "内容简短自然，符合你的性格，不要提及这是系统触发或你在'自言自语'。"
-            "直接输出你想说的话即可。"
-        )
-        if dynamic_state_prompt:
-            trigger_msg += dynamic_state_prompt
 
         self.pending_output_image = None
-
-        response = self.chat.send_message([trigger_msg])
-
-        response_text = ""
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.text and not part.text.strip().startswith(("THOUGHT", "THINK")):
-                    response_text += part.text
 
         # 清理 AI 可能模仿输出的系统标记
         response_text = re.sub(r'\[\u7cfb\u7edf\u65f6\u95f4\u611f\u77e5[^\]]*\]', '', response_text)
         response_text = re.sub(r'\[SYS_PROACTIVE[^\]]*\]', '', response_text)
         response_text = re.sub(r'\[\u7cfb\u7edf\u9644\u52a0[^\]]*\]', '', response_text)
         response_text = response_text.strip()
-
-        # 从 chat history 中移除注入的假"用户"触发消息，保持历史干净
-        # automatic_function_calling 可能在末尾追加 function_response(user) 项，
-        # 不能仅检查最后一条 user。
-        try:
-            history = self.chat._curated_history
-            for i in range(len(history) - 1, -1, -1):
-                if history[i].role == 'user':
-                    is_proactive = any(
-                        hasattr(p, 'text') and p.text and '[SYS_PROACTIVE]' in p.text
-                        for p in history[i].parts
-                    )
-                    if is_proactive:
-                        del history[i]
-        except Exception:
-            pass
 
         image_path = self.pending_output_image
         
@@ -1632,7 +1502,7 @@ class ChatAI:
                 trigger_message=trigger_hint,
                 model_reply=response_text if response_text.strip() else "[AI发送了一张图片]",
                 base_state=current_state,
-                turn_plan=proactive_plan,
+                turn_plan=None,
                 proactive=True
             )
 
