@@ -151,58 +151,29 @@ class ChatAI:
         self.character_photo_path = "/data/three/media/photos/photo_nanase.jpg"
         self.user_photo_path = "/data/three/media/photos/photo_siyuan.jpg"
         
-        character_photo_part = None
-        if os.path.exists(self.character_photo_path):
-            try:
-                with open(self.character_photo_path, 'rb') as f:
-                    photo_data = f.read()
-                character_photo_part = types.Part.from_bytes(data=photo_data, mime_type='image/jpeg')
-            except Exception as e:
-                logger.error(f"加载设定图出错: {e}")
-
-        user_photo_part = None
-        if os.path.exists(self.user_photo_path):
-            try:
-                with open(self.user_photo_path, 'rb') as f:
-                    u_photo_data = f.read()
-                user_photo_part = types.Part.from_bytes(data=u_photo_data, mime_type='image/jpeg')
-            except Exception as e:
-                logger.error(f"加载用户设定图出错: {e}")
-
         # 从数据库加载过去 24 小时的历史记录作为当天的缓冲区
         history = []
-        # base_history 保存设定图注入、每次 clear_history 后复用
+        # base_history 保存基础系统提示条目、每次 clear_history 后复用
         self.base_history = []
-        
-        # 1. 注入角色设定图
-        if character_photo_part:
+        if os.path.exists(self.character_photo_path):
             history.append({
                 'role': 'user',
-                'parts': [
-                    {'text': "系统通知：以下是你的官方形象设定图（Self-Image Reference）。请仔细观察并分析你的外貌、发型、面部特征及穿着。在后续对话中，如果你需要生成关于自己的图片，请务必保持视觉一致。"},
-                    character_photo_part
-                ]
+                'parts': [{'text': "系统通知：你有固定形象参考图。仅在需要生成你自己的图片时才启用这份视觉参考，并保持一致性。"}]
             })
             history.append({
                 'role': 'model',
-                'parts': [{'text': "我已经看到了我的设定图。我会记住我的面部特征和整体形象，并在需要生成我的照片时保持一致性。"}]
+                'parts': [{'text': "收到。普通文字聊天时我不会反复提这件事，只有生成相关图片时才会按设定保持一致。"}]
             })
-            self.base_history = list(history)  # 浅拷贝当前的设定图条目
-
-        # 2. 注入用户（思远）设定图
-        if user_photo_part:
+        if os.path.exists(self.user_photo_path):
             history.append({
                 'role': 'user',
-                'parts': [
-                    {'text': "系统通知：以下是当前对话用户（名：思远）的肖像参考图。请通过此图建立对用户的视觉认知。当你生成关于用户的照片时，请以此为基准。"},
-                    user_photo_part
-                ]
+                'parts': [{'text': "系统通知：你也有思远的肖像参考图。仅在需要生成与他相关的图片时使用，不必在普通聊天里反复提及。"}]
             })
             history.append({
                 'role': 'model',
-                'parts': [{'text': "收到了，我已经看到了思远的肖像图。我会记住他的样子。"}]
+                'parts': [{'text': "知道了。只有在生成和他相关的图片时我才会调用这份参考。"}]
             })
-            self.base_history = list(history)  # 更新，包含两张设定图
+        self.base_history = list(history)
 
         # 从数据库加载动态缓冲：0-4点加载前一天4点后的记录；5-23点加载当天4点后的记录
         if character_id:
@@ -226,15 +197,6 @@ class ChatAI:
 
                 parts = [{'text': text_content}]
                 
-                # 如果有图片，从本地磁盘加载
-                if msg.get('media_path') and os.path.exists(msg['media_path']):
-                    try:
-                        with open(msg['media_path'], 'rb') as f:
-                            img_data = f.read()
-                        parts.append(types.Part.from_bytes(data=img_data, mime_type=msg.get('media_type', 'image/jpeg')))
-                    except Exception as e:
-                        logger.error(f"加载历史图片失败: {e}")
-
                 history.append({
                     'role': msg['role'],
                     'parts': parts
@@ -533,6 +495,38 @@ class ChatAI:
                 lines.append(f"{role_name}: {content}")
         return "\n".join(lines[-limit:])
 
+    def _build_compact_relationship_context(self):
+        if not self.character_id:
+            return ""
+        try:
+            state = self.db.get_relationship_state(self.character_id)
+        except Exception as e:
+            logger.error(f"读取关系状态失败: {e}")
+            return ""
+        if not state:
+            return ""
+
+        def judge(val):
+            value = float(val or 0.0)
+            if value >= 0.75:
+                return "高"
+            if value >= 0.55:
+                return "偏高"
+            if value <= 0.2:
+                return "很低"
+            if value <= 0.4:
+                return "偏低"
+            return "中"
+
+        return (
+            "[系统附加关系摘要]\n"
+            f"- 阶段: {state.get('stage', 'unknown')}\n"
+            f"- 亲密={judge(state.get('closeness'))} 信任={judge(state.get('trust'))} 安全={judge(state.get('security'))}\n"
+            f"- 吸引={judge(state.get('attraction'))} 依赖={judge(state.get('dependency'))} 嫉妒={judge(state.get('jealousy'))} 怨念={judge(state.get('resentment'))}\n"
+            f"- 当前叙事: {(state.get('narrative') or '暂无').strip()[:80]}\n"
+            "回复时只把它当成底色，不要复读这些标签。"
+        )
+
     @staticmethod
     def _safe_json_loads(raw_text):
         text = (raw_text or "").strip()
@@ -738,10 +732,12 @@ class ChatAI:
             adjusted["last_trigger_source"] = "用户新消息"
 
         if relation_desc:
-            if "Security(Very Low)" in relation_desc or "Security(Low)" in relation_desc:
+            if ("安全=很低" in relation_desc or "安全=偏低" in relation_desc) or \
+               "Security(Very Low)" in relation_desc or "Security(Low)" in relation_desc:
                 adjusted["hidden_expectation"] = "希望他多给一点确定感和偏爱"
                 notes.append("长期安全感偏低，隐性期待转向确定感")
-            if "Jealousy(Very High)" in relation_desc or "Jealousy(High)" in relation_desc:
+            if ("嫉妒=高" in relation_desc or "嫉妒=偏高" in relation_desc) or \
+               "Jealousy(Very High)" in relation_desc or "Jealousy(High)" in relation_desc:
                 if adjusted.get("scene_label") == "日常":
                     adjusted["scene_label"] = "试探"
                 notes.append("长期嫉妒位较高，场景更容易滑向试探")
@@ -972,7 +968,16 @@ class ChatAI:
 
         state = dynamic_state or self.dynamic_state or {}
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        state_json = json.dumps(state, ensure_ascii=False, default=str)
+        state_json = json.dumps({
+            "scene_label": state.get("scene_label"),
+            "emotion_label": state.get("emotion_label"),
+            "emotion_intensity": state.get("emotion_intensity"),
+            "motivation_label": state.get("motivation_label"),
+            "user_affect": state.get("user_affect"),
+            "repair_status": state.get("repair_status"),
+            "warmth_bias": state.get("warmth_bias"),
+            "initiative_bias": state.get("initiative_bias"),
+        }, ensure_ascii=False, default=str)
         prompt = (
             f"当前时间（Asia/Shanghai）: {now_str}\n"
             "你是角色的【回合表达导演】。你不直接写回复，只决定这轮要怎么回才更像真人。\n"
@@ -1003,7 +1008,7 @@ class ChatAI:
             "9) notes 写一句表达提醒，比如 别解释太满/先顺毛再逗/别太像助手。\n"
             "10) 只输出 JSON。\n\n"
             f"当前动态状态：{state_json}\n\n"
-            f"关系上下文：\n{relation_desc or '暂无'}\n\n"
+            f"关系上下文：\n{(relation_desc or '暂无')[:240]}\n\n"
             f"是否用户索图：{'是' if image_requested else '否'}\n"
             f"是否主动发言：{'是' if proactive else '否'}\n\n"
             f"用户消息或触发语：\n{latest_user_message}"
@@ -1076,11 +1081,11 @@ class ChatAI:
             f"- 你感受到的用户状态：{state.get('user_affect', '普通')}\n"
             f"- 当前动机：{state.get('motivation_label', '先接住他 再顺手要一点关注')}\n"
             f"- 当前克制：{state.get('inhibition_label', '不想显得太黏 也不想把话说满')}\n"
-            f"- 隐性期待：{state.get('hidden_expectation', '希望他主动多哄一点 多顺着自己一点')}\n"
-            f"- 尚未满足的点：{state.get('unresolved_need', '想被在意 但不想直说')}\n"
-            f"- 情绪余波：{state.get('carryover_summary', '心里有点想黏人 但还端着')}\n"
+            f"- 隐性期待：{self._clean_state_text(state.get('hidden_expectation'), '希望他主动多哄一点 多顺着自己一点', limit=40)}\n"
+            f"- 尚未满足的点：{self._clean_state_text(state.get('unresolved_need'), '想被在意 但不想直说', limit=36)}\n"
+            f"- 情绪余波：{self._clean_state_text(state.get('carryover_summary'), '心里有点想黏人 但还端着', limit=42)}\n"
             f"- 关系修复状态：{state.get('repair_status', '无需修复')}\n"
-            f"- 表达建议：{state.get('reply_style', '短句 口语化 别解释太满 带点嘴硬和留白')}\n"
+            f"- 表达建议：{self._clean_state_text(state.get('reply_style'), '短句 口语化 别解释太满 带点嘴硬和留白', limit=48)}\n"
             f"- 当前亲近倾向：warmth={warmth_text}, initiative={initiative_text}\n"
         )
         if turn_plan:
@@ -1088,13 +1093,13 @@ class ChatAI:
                 "\n[系统附加本轮表达决策]\n"
                 f"- 回应模式：{turn_plan.get('response_mode', '接住')}\n"
                 f"- 语气：{turn_plan.get('tone', '嘴硬里带一点软')}\n"
-                f"- 主目标：{turn_plan.get('goal', '先接住对方 再保持点亲密感')}\n"
+                f"- 主目标：{self._clean_state_text(turn_plan.get('goal'), '先接住对方 再保持点亲密感', limit=32)}\n"
                 f"- 是否追问：{'是' if turn_plan.get('should_ask_question') else '否'}\n"
                 f"- 是否逗他：{'是' if turn_plan.get('should_tease') else '否'}\n"
                 f"- 是否主动帮忙：{'是' if turn_plan.get('should_offer_help') else '否'}\n"
                 f"- 是否提旧事：{'是' if turn_plan.get('should_reference_memory') else '否'}\n"
                 f"- 句数上限：{turn_plan.get('max_sentences', 2)}\n"
-                f"- 本轮提醒：{turn_plan.get('notes', '别太像助手')}\n"
+                f"- 本轮提醒：{self._clean_state_text(turn_plan.get('notes'), '别太像助手', limit=28)}\n"
             )
         prompt += "回复时让语气、主动性和留白程度与这些状态一致，不要分析自己，不要一口气把心里话全说透。"
         return prompt
@@ -1288,6 +1293,7 @@ class ChatAI:
         context_prefix = None
         proactive_image_forced = False
         relation_desc = ""
+        compact_relation_desc = ""
         dynamic_state = self.dynamic_state
         turn_plan = None
         
@@ -1365,19 +1371,19 @@ class ChatAI:
 
                 # 调取深度关系建模描述（第三层：解释式注入）
                 relation_desc = self.db.get_relationship_description(self.character_id)
-                if relation_desc:
-                    episodic_text += f"\n\n{relation_desc}"
-                    episodic_text += "\n\n【回复指南】请结合上述长期关系状态和当前短期情绪进行回复。你的行为应符合当前的关系阶段。如果是 jealous(嫉妒) 高位，请表现出占有欲；如果是 security(安全感) 低位，请表现出不安。"
+                compact_relation_desc = self._build_compact_relationship_context()
+                if compact_relation_desc:
+                    episodic_text += f"\n\n{compact_relation_desc}"
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).error(f"检索记忆失败: {e}")
 
         if self.character_id:
-            dynamic_state = self._refresh_dynamic_state(message, relation_desc=relation_desc)
+            dynamic_state = self._refresh_dynamic_state(message, relation_desc=compact_relation_desc)
             turn_plan = self._plan_turn_response(
                 message,
                 dynamic_state,
-                relation_desc=relation_desc,
+                relation_desc=compact_relation_desc,
                 image_requested=self._should_prefer_image_response(message, image_data=image_data),
                 proactive=False
             )
