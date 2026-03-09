@@ -204,11 +204,17 @@ class ChatAI:
                 })
         
         def classify_image_subject(prompt_text: str):
-            """根据提示词判断生图主体，返回 character_only/user_only/both/none"""
+            """根据提示词判断生图主体，返回 character_only/user_only/both/non_portrait/none"""
             text = (prompt_text or "").strip().lower()
             if not text:
                 return "none"
 
+            explicit_non_portrait_keywords = [
+                "纯风景", "只有风景", "不要人物", "不需要人物", "无人", "没人",
+                "纯场景", "纯物体", "只有物体", "静物", "产品图",
+                "landscape only", "scenery only", "no people", "without people",
+                "object only", "still life", "product shot"
+            ]
             both_keywords = [
                 "我们", "一起", "同框", "合照", "你和我", "我和你", "咱俩", "两个人",
                 "both of us", "together", "couple", "with me", "with siyuan", "with the user"
@@ -221,6 +227,15 @@ class ChatAI:
                 "我", "我自己", "思远", "siyuan", "the user", "user only", "我的照片",
                 "我长什么样", "给我画", "me", "myself"
             ]
+            person_keywords = [
+                "人", "人物", "女生", "女孩", "男生", "肖像", "自拍", "半身", "全身",
+                "person", "people", "girl", "boy", "portrait", "selfie", "character"
+            ]
+
+            if any(k in text for k in explicit_non_portrait_keywords) and not any(
+                k in text for k in person_keywords
+            ):
+                return "non_portrait"
 
             if any(k in text for k in both_keywords):
                 return "both"
@@ -248,7 +263,8 @@ class ChatAI:
                     "She must remain the same person, not a redesigned variant. "
                     "Identity preservation requirements: keep the same face shape, eyes, eye shape, hairstyle, bangs, "
                     "hair color, age impression, and overall facial identity. Do not turn her into a different anime girl. "
-                    "Reference image 1 is the main and only identity reference."
+                    "Reference image 1 is the main and only identity reference. "
+                    "If any appearance description in scene text conflicts with reference image 1, always follow reference image 1."
                 )
             elif subject_mode == "user_only":
                 identity_block = (
@@ -256,7 +272,8 @@ class ChatAI:
                     "He must remain the same person, not a redesigned variant. "
                     "Identity preservation requirements: keep the same face shape, eyes, hairstyle, hair color, "
                     "age impression, and overall facial identity. Do not redesign him into a different anime character. "
-                    "Reference image 1 is the main and only identity reference."
+                    "Reference image 1 is the main and only identity reference. "
+                    "If any appearance description in scene text conflicts with reference image 1, always follow reference image 1."
                 )
             elif subject_mode == "both":
                 identity_block = (
@@ -264,7 +281,8 @@ class ChatAI:
                     "Reference image 1 is the girl, reference image 2 is the user Siyuan. "
                     "Both must remain the same people, not redesigned variants. "
                     "Preserve each person's face shape, eyes, hairstyle, hair color, age impression, "
-                    "and overall identity. Do not merge their facial features."
+                    "and overall identity. Do not merge their facial features. "
+                    "If scene text conflicts with either reference appearance, always follow the references."
                 )
             else:
                 identity_block = (
@@ -283,6 +301,39 @@ class ChatAI:
                 "- avoid changing the identity of referenced people\n"
             )
 
+        def sanitize_scene_prompt_for_identity(scene_text: str, subject_mode: str) -> str:
+            """
+            参考图模式下，清理与身份外观强相关的描述，避免上游工具参数把发型等特征写偏。
+            只保留场景动作、氛围、构图等描述。
+            """
+            text = (scene_text or "").strip()
+            if not text:
+                return text
+            if subject_mode not in ("character_only", "user_only", "both"):
+                return text
+
+            patterns = [
+                # English hair descriptors
+                r"\b(long|short|medium|shoulder[- ]length|waist[- ]length)\s+(straight|wavy|curly)?\s*hair\b",
+                r"\b(straight|wavy|curly)\s+(black|brown|blonde|silver|white|red|pink|blue|purple)?\s*hair\b",
+                r"\bwith\s+[a-z\s,/-]{0,40}?hair\b",
+                # Chinese hair descriptors
+                r"(长发|短发|中长发|齐肩发|黑长直|卷发|直发|波浪发|双马尾|单马尾|丸子头|刘海)",
+                # face/identity-detail style hints that can drift identity
+                r"\bwith\s+(a\s+)?(beautiful|cute|handsome|refined|delicate)\s+(face|features|look)\b",
+            ]
+
+            cleaned = text
+            for p in patterns:
+                cleaned = re.sub(p, "", cleaned, flags=re.IGNORECASE)
+
+            # collapse punctuation/whitespace artifacts after removals
+            cleaned = re.sub(r"\s{2,}", " ", cleaned)
+            cleaned = re.sub(r"\s+,", ",", cleaned)
+            cleaned = re.sub(r",\s*,", ", ", cleaned)
+            cleaned = cleaned.strip(" ,;，；")
+            return cleaned or text
+
         # 定义 AI 生成图片的工具
         def generate_image(prompt: str) -> str:
             """根据描述生成一张精美的图片。
@@ -293,7 +344,13 @@ class ChatAI:
             try:
                 generation_contents = []
                 subject_mode = classify_image_subject(prompt)
-                full_prompt = build_image_prompt(prompt, subject_mode)
+                # 主体不明确时默认带角色设定图；明确非人物请求则不注入人物参考图
+                if subject_mode == "none":
+                    subject_mode = "character_only"
+                elif subject_mode == "non_portrait":
+                    subject_mode = "none"
+                sanitized_prompt = sanitize_scene_prompt_for_identity(prompt, subject_mode)
+                full_prompt = build_image_prompt(sanitized_prompt, subject_mode)
                 generation_contents.append(full_prompt)
 
                 if subject_mode in ("character_only", "both") and os.path.exists(self.character_photo_path):
