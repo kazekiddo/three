@@ -676,6 +676,100 @@ class Database:
             if score < 0.3:
                 cur.execute("UPDATE core_fact_memories SET is_archived = true WHERE id = %s", (fact_id,))
             conn.commit()
+
+    # --- 动态心智状态方法开始 ---
+
+    def get_dynamic_state(self, character_id):
+        """获取角色当前的短期心智状态"""
+        conn = self.connect()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT character_id, scene_label, emotion_label, emotion_intensity,
+                              motivation_label, inhibition_label, hidden_expectation,
+                              last_user_intent, user_affect, unresolved_need,
+                              carryover_summary, reply_style, warmth_bias,
+                              initiative_bias, last_trigger_source, repair_status, updated_at
+                       FROM character_dynamic_states
+                       WHERE character_id = %s""",
+                    (character_id,)
+                )
+                return cur.fetchone()
+        except Exception as e:
+            conn.rollback()
+            logging.warning(f"读取动态心智状态失败: {e}")
+            return None
+
+    def upsert_dynamic_state(
+        self,
+        character_id,
+        scene_label,
+        emotion_label,
+        emotion_intensity,
+        motivation_label,
+        inhibition_label,
+        hidden_expectation,
+        last_user_intent,
+        user_affect,
+        unresolved_need,
+        carryover_summary,
+        reply_style,
+        warmth_bias,
+        initiative_bias,
+        last_trigger_source,
+        repair_status
+    ):
+        """写入或更新角色当前的短期心智状态"""
+        conn = self.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO character_dynamic_states
+                       (character_id, scene_label, emotion_label, emotion_intensity, motivation_label,
+                        inhibition_label, hidden_expectation, last_user_intent, user_affect,
+                        unresolved_need, carryover_summary, reply_style, warmth_bias,
+                        initiative_bias, last_trigger_source, repair_status, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                       ON CONFLICT (character_id) DO UPDATE
+                       SET scene_label = EXCLUDED.scene_label,
+                           emotion_label = EXCLUDED.emotion_label,
+                           emotion_intensity = EXCLUDED.emotion_intensity,
+                           motivation_label = EXCLUDED.motivation_label,
+                           inhibition_label = EXCLUDED.inhibition_label,
+                           hidden_expectation = EXCLUDED.hidden_expectation,
+                           last_user_intent = EXCLUDED.last_user_intent,
+                           user_affect = EXCLUDED.user_affect,
+                           unresolved_need = EXCLUDED.unresolved_need,
+                           carryover_summary = EXCLUDED.carryover_summary,
+                           reply_style = EXCLUDED.reply_style,
+                           warmth_bias = EXCLUDED.warmth_bias,
+                           initiative_bias = EXCLUDED.initiative_bias,
+                           last_trigger_source = EXCLUDED.last_trigger_source,
+                           repair_status = EXCLUDED.repair_status,
+                           updated_at = CURRENT_TIMESTAMP""",
+                    (
+                        character_id,
+                        scene_label,
+                        emotion_label,
+                        emotion_intensity,
+                        motivation_label,
+                        inhibition_label,
+                        hidden_expectation,
+                        last_user_intent,
+                        user_affect,
+                        unresolved_need,
+                        carryover_summary,
+                        reply_style,
+                        warmth_bias,
+                        initiative_bias,
+                        last_trigger_source,
+                        repair_status
+                    )
+                )
+                conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logging.warning(f"写入动态心智状态失败: {e}")
     # --- 提醒任务方法开始 ---
 
     def add_reminder(self, character_id, user_id, task_content, remind_at, source_type='user_request'):

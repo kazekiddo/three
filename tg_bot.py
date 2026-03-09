@@ -145,6 +145,7 @@ class ChatAI:
         self.last_proactive_image_timestamp = None
         self.proactive_image_cooldown_seconds = int(os.getenv("PROACTIVE_IMAGE_COOLDOWN_SECONDS", "3600"))
         self.proactive_image_probability = float(os.getenv("PROACTIVE_IMAGE_PROBABILITY", "0.35"))
+        self.dynamic_state = self.db.get_dynamic_state(character_id) if character_id else None
         
         # 预加载角色设定图和用户（思远）设定图 (用于视觉一致性)
         self.character_photo_path = "/data/three/media/photos/photo_nanase.jpg"
@@ -499,6 +500,402 @@ class ChatAI:
             return sources
         return sources
 
+    @staticmethod
+    def _clamp(value, low, high):
+        return max(low, min(high, value))
+
+    @staticmethod
+    def _clean_state_text(value, default, limit=80):
+        text = str(value or "").strip()
+        if not text:
+            return default
+        return text[:limit]
+
+    def _recent_dialogue_excerpt(self, limit=8):
+        if not self.character_id:
+            return ""
+        try:
+            messages = self.db.get_chat_history(self.character_id, limit=limit)
+        except Exception as e:
+            logger.error(f"读取近期对话失败: {e}")
+            return ""
+
+        lines = []
+        for msg in messages:
+            content = (msg.get('content') or '').strip()
+            if not content:
+                continue
+            role_name = "思远" if msg.get('role') == 'user' else "你"
+            prefix = (msg.get('context_prefix') or '').strip()
+            if prefix:
+                lines.append(f"{prefix} {role_name}: {content}")
+            else:
+                lines.append(f"{role_name}: {content}")
+        return "\n".join(lines[-limit:])
+
+    @staticmethod
+    def _safe_json_loads(raw_text):
+        text = (raw_text or "").strip()
+        if not text:
+            return {}
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        return json.loads(text)
+
+    def _normalize_float(self, value, fallback, low=0.0, high=1.0):
+        try:
+            value = float(value)
+        except Exception:
+            value = fallback
+        return round(self._clamp(value, low, high), 2)
+
+    def _normalize_dynamic_state(self, data, fallback=None):
+        fallback = fallback or {}
+        if not isinstance(data, dict):
+            data = {}
+
+        return {
+            "scene_label": self._clean_state_text(
+                data.get("scene_label"),
+                fallback.get("scene_label") or "日常",
+                limit=50
+            ),
+            "emotion_label": self._clean_state_text(
+                data.get("emotion_label"),
+                fallback.get("emotion_label") or "表面平静",
+                limit=50
+            ),
+            "emotion_intensity": self._normalize_float(
+                data.get("emotion_intensity", fallback.get("emotion_intensity", 0.38)),
+                fallback=0.38
+            ),
+            "motivation_label": self._clean_state_text(
+                data.get("motivation_label"),
+                fallback.get("motivation_label") or "先接住他 再顺手要一点关注",
+                limit=80
+            ),
+            "inhibition_label": self._clean_state_text(
+                data.get("inhibition_label"),
+                fallback.get("inhibition_label") or "不想显得太黏 也不想把话说满",
+                limit=100
+            ),
+            "hidden_expectation": self._clean_state_text(
+                data.get("hidden_expectation"),
+                fallback.get("hidden_expectation") or "希望他主动多哄一点 多顺着自己一点",
+                limit=120
+            ),
+            "last_user_intent": self._clean_state_text(
+                data.get("last_user_intent"),
+                fallback.get("last_user_intent") or "日常聊天",
+                limit=80
+            ),
+            "user_affect": self._clean_state_text(
+                data.get("user_affect"),
+                fallback.get("user_affect") or "普通",
+                limit=80
+            ),
+            "unresolved_need": self._clean_state_text(
+                data.get("unresolved_need"),
+                fallback.get("unresolved_need") or "想被在意 但不想直说",
+                limit=140
+            ),
+            "carryover_summary": self._clean_state_text(
+                data.get("carryover_summary"),
+                fallback.get("carryover_summary") or "心里有点想黏人 但还端着",
+                limit=180
+            ),
+            "reply_style": self._clean_state_text(
+                data.get("reply_style"),
+                fallback.get("reply_style") or "短句 口语化 别解释太满 带点嘴硬和留白",
+                limit=180
+            ),
+            "warmth_bias": self._normalize_float(
+                data.get("warmth_bias", fallback.get("warmth_bias", 0.58)),
+                fallback=0.58
+            ),
+            "initiative_bias": self._normalize_float(
+                data.get("initiative_bias", fallback.get("initiative_bias", 0.46)),
+                fallback=0.46
+            ),
+            "last_trigger_source": self._clean_state_text(
+                data.get("last_trigger_source"),
+                fallback.get("last_trigger_source") or "日常互动",
+                limit=80
+            ),
+            "repair_status": self._clean_state_text(
+                data.get("repair_status"),
+                fallback.get("repair_status") or "无需修复",
+                limit=80
+            ),
+        }
+
+    def _derive_carryover_state(self, existing_state, now_dt):
+        if not existing_state:
+            return {}
+
+        carry = dict(existing_state)
+        updated_at = existing_state.get("updated_at")
+        if isinstance(updated_at, datetime.datetime):
+            hours_gap = max((now_dt - updated_at).total_seconds() / 3600.0, 0.0)
+        else:
+            hours_gap = 1.5
+
+        decay = min(hours_gap * 0.08, 0.28)
+        carry["emotion_intensity"] = round(
+            self._clamp(float(existing_state.get("emotion_intensity", 0.38)) - decay, 0.18, 0.95),
+            2
+        )
+        carry["warmth_bias"] = round(0.75 * float(existing_state.get("warmth_bias", 0.58)) + 0.25 * 0.58, 2)
+        carry["initiative_bias"] = round(0.75 * float(existing_state.get("initiative_bias", 0.46)) + 0.25 * 0.46, 2)
+
+        repair_status = str(existing_state.get("repair_status") or "")
+        if repair_status in {"待安抚", "有点别扭"} and hours_gap >= 6:
+            carry["repair_status"] = "情绪淡了 但还记得"
+
+        carryover = str(existing_state.get("carryover_summary") or "").strip()
+        if carryover and hours_gap >= 10:
+            carry["carryover_summary"] = f"之前那点情绪淡了些 但余味还在：{carryover[:60]}"
+
+        return carry
+
+    def _refresh_dynamic_state(self, latest_user_message: str, relation_desc: str = ""):
+        if not self.character_id or not latest_user_message.strip():
+            return self.dynamic_state
+
+        now_dt = datetime.datetime.now()
+        existing_state = self.db.get_dynamic_state(self.character_id) or self.dynamic_state or {}
+        carryover_state = self._derive_carryover_state(existing_state, now_dt)
+        recent_dialogue = self._recent_dialogue_excerpt(limit=8)
+        now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        relationship_context = relation_desc.strip() if relation_desc else "暂无额外关系上下文"
+        existing_state_json = json.dumps(existing_state, ensure_ascii=False, default=str)
+        carryover_state_json = json.dumps(carryover_state, ensure_ascii=False, default=str)
+
+        prompt = (
+            f"当前时间（Asia/Shanghai）: {now_str}\n"
+            "你是角色的【短期心智状态引擎】。你的任务不是代替角色回复，而是推断她这一刻真实的内在状态。\n"
+            "请综合既有状态、时间衰减后的延续状态、最近对话和用户这条新消息，输出一个 JSON 对象，字段必须完整：\n"
+            "{"
+            "\"scene_label\":\"...\","
+            "\"emotion_label\":\"...\","
+            "\"emotion_intensity\":0.0,"
+            "\"motivation_label\":\"...\","
+            "\"inhibition_label\":\"...\","
+            "\"hidden_expectation\":\"...\","
+            "\"last_user_intent\":\"...\","
+            "\"user_affect\":\"...\","
+            "\"unresolved_need\":\"...\","
+            "\"carryover_summary\":\"...\","
+            "\"reply_style\":\"...\","
+            "\"warmth_bias\":0.0,"
+            "\"initiative_bias\":0.0,"
+            "\"last_trigger_source\":\"...\","
+            "\"repair_status\":\"...\""
+            "}\n"
+            "约束：\n"
+            "1) scene_label 必须是简短场景标签，如 日常/撒娇/求助/汇报/邀约/冲突/修复/试探/分享/敷衍。\n"
+            "2) emotion_label 用简短中文，如 平静/开心/委屈/不安/吃醋/烦躁/想撒娇。\n"
+            "3) emotion_intensity、warmth_bias、initiative_bias 都在 0.0 到 1.0 之间。\n"
+            "4) motivation_label 说明她此刻最想做的事，如 接住他/求关注/确认态度/轻微吃醋/认真帮忙。\n"
+            "5) inhibition_label 说明她此刻在克制什么；若没有写 无。\n"
+            "6) hidden_expectation 写她隐隐希望对方怎么做，但不要写成命令。\n"
+            "7) user_affect 写你感受到的用户状态，如 开心/疲惫/敷衍/认真/求安慰/想分享。\n"
+            "8) unresolved_need 写本轮后她心里最没被满足的那个点，若没有可写 无明显缺口。\n"
+            "9) carryover_summary 写一句 35 字内的情绪余波，表示这轮之后会残留什么感觉。\n"
+            "10) reply_style 只描述表达方式，不能直接代写台词。\n"
+            "11) repair_status 表示关系修复状态，如 无需修复/待安抚/正在变软/有点别扭/已被哄好。\n"
+            "12) 只输出 JSON，不要 markdown，不要解释。\n\n"
+            f"已有短期状态：{existing_state_json}\n\n"
+            f"按时间衰减后的延续状态：{carryover_state_json}\n\n"
+            f"关系上下文：\n{relationship_context}\n\n"
+            f"最近对话：\n{recent_dialogue or '暂无'}\n\n"
+            f"用户新消息：\n{latest_user_message}"
+        )
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type='application/json',
+                    temperature=0.25
+                )
+            )
+            raw_text = response.text.strip() if response and response.text else ""
+            payload = self._safe_json_loads(raw_text) if raw_text else {}
+            normalized = self._normalize_dynamic_state(payload, fallback=carryover_state or existing_state)
+            self.db.upsert_dynamic_state(
+                self.character_id,
+                normalized["scene_label"],
+                normalized["emotion_label"],
+                normalized["emotion_intensity"],
+                normalized["motivation_label"],
+                normalized["inhibition_label"],
+                normalized["hidden_expectation"],
+                normalized["last_user_intent"],
+                normalized["user_affect"],
+                normalized["unresolved_need"],
+                normalized["carryover_summary"],
+                normalized["reply_style"],
+                normalized["warmth_bias"],
+                normalized["initiative_bias"],
+                normalized["last_trigger_source"],
+                normalized["repair_status"]
+            )
+            self.dynamic_state = normalized
+            return normalized
+        except Exception as e:
+            logger.error(f"刷新动态心智状态失败: {e}")
+            self.dynamic_state = self._normalize_dynamic_state({}, fallback=carryover_state or existing_state)
+            return self.dynamic_state
+
+    def _plan_turn_response(self, latest_user_message, dynamic_state, relation_desc="", image_requested=False, proactive=False):
+        if not latest_user_message.strip():
+            return {}
+
+        state = dynamic_state or self.dynamic_state or {}
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        state_json = json.dumps(state, ensure_ascii=False, default=str)
+        prompt = (
+            f"当前时间（Asia/Shanghai）: {now_str}\n"
+            "你是角色的【回合表达导演】。你不直接写回复，只决定这轮要怎么回才更像真人。\n"
+            "请输出一个 JSON 对象：\n"
+            "{"
+            "\"response_mode\":\"...\","
+            "\"tone\":\"...\","
+            "\"goal\":\"...\","
+            "\"should_ask_question\":true,"
+            "\"should_tease\":false,"
+            "\"should_offer_help\":false,"
+            "\"should_reference_memory\":false,"
+            "\"should_be_extra_brief\":true,"
+            "\"max_sentences\":2,"
+            "\"warmth_level\":0.0,"
+            "\"initiative_level\":0.0,"
+            "\"notes\":\"...\""
+            "}\n"
+            "规则：\n"
+            "1) response_mode 只能是 接住/安抚/调情/吐槽/认真帮忙/轻微吃醋/追问/冷一点/分享/提醒。\n"
+            "2) tone 用短中文，如 软一点/嘴硬/认真/懒散/委屈里带刺/撒娇/故作无所谓。\n"
+            "3) goal 写这轮唯一主目标。\n"
+            "4) max_sentences 取 1 到 4；大多数情况不超过 2。\n"
+            "5) should_ask_question 只有在推进互动真有必要时才为 true。\n"
+            "6) should_reference_memory 只有对提升亲密感有帮助时才为 true。\n"
+            "7) should_offer_help 只有用户在求助、卡住、焦虑或明确要方案时才为 true。\n"
+            "8) should_tease 只在气氛安全时使用。\n"
+            "9) notes 写一句表达提醒，比如 别解释太满/先顺毛再逗/别太像助手。\n"
+            "10) 只输出 JSON。\n\n"
+            f"当前动态状态：{state_json}\n\n"
+            f"关系上下文：\n{relation_desc or '暂无'}\n\n"
+            f"是否用户索图：{'是' if image_requested else '否'}\n"
+            f"是否主动发言：{'是' if proactive else '否'}\n\n"
+            f"用户消息或触发语：\n{latest_user_message}"
+        )
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type='application/json',
+                    temperature=0.2
+                )
+            )
+            payload = self._safe_json_loads(response.text.strip() if response and response.text else "")
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception as e:
+            logger.error(f"生成回合表达决策失败: {e}")
+            payload = {}
+
+        try:
+            max_sentences = int(payload.get("max_sentences", 2))
+        except Exception:
+            max_sentences = 2
+
+        return {
+            "response_mode": self._clean_state_text(payload.get("response_mode"), "接住", limit=40),
+            "tone": self._clean_state_text(payload.get("tone"), "嘴硬里带一点软", limit=60),
+            "goal": self._clean_state_text(payload.get("goal"), "先接住对方 再保持点亲密感", limit=100),
+            "should_ask_question": bool(payload.get("should_ask_question", False)),
+            "should_tease": bool(payload.get("should_tease", False)),
+            "should_offer_help": bool(payload.get("should_offer_help", False)),
+            "should_reference_memory": bool(payload.get("should_reference_memory", False)),
+            "should_be_extra_brief": bool(payload.get("should_be_extra_brief", True)),
+            "max_sentences": max(1, min(max_sentences, 4)),
+            "warmth_level": self._normalize_float(
+                payload.get("warmth_level", state.get("warmth_bias", 0.58)),
+                fallback=float(state.get("warmth_bias", 0.58))
+            ),
+            "initiative_level": self._normalize_float(
+                payload.get("initiative_level", state.get("initiative_bias", 0.46)),
+                fallback=float(state.get("initiative_bias", 0.46))
+            ),
+            "notes": self._clean_state_text(payload.get("notes"), "别太像助手", limit=120)
+        }
+
+    def _build_dynamic_state_prompt(self, state=None, turn_plan=None):
+        state = state or self.dynamic_state
+        if not state:
+            return ""
+
+        try:
+            intensity_text = f"{float(state.get('emotion_intensity', 0.38)):.2f}"
+        except Exception:
+            intensity_text = "0.38"
+        try:
+            warmth_text = f"{float(state.get('warmth_bias', 0.58)):.2f}"
+        except Exception:
+            warmth_text = "0.58"
+        try:
+            initiative_text = f"{float(state.get('initiative_bias', 0.46)):.2f}"
+        except Exception:
+            initiative_text = "0.46"
+
+        prompt = (
+            "\n\n[系统附加短期心智状态：仅供角色内在把握，不要直接复述这些标签]\n"
+            f"- 当前场景：{state.get('scene_label', '日常')}\n"
+            f"- 当前情绪：{state.get('emotion_label', '表面平静')} (强度 {intensity_text})\n"
+            f"- 你感受到的用户状态：{state.get('user_affect', '普通')}\n"
+            f"- 当前动机：{state.get('motivation_label', '先接住他 再顺手要一点关注')}\n"
+            f"- 当前克制：{state.get('inhibition_label', '不想显得太黏 也不想把话说满')}\n"
+            f"- 隐性期待：{state.get('hidden_expectation', '希望他主动多哄一点 多顺着自己一点')}\n"
+            f"- 尚未满足的点：{state.get('unresolved_need', '想被在意 但不想直说')}\n"
+            f"- 情绪余波：{state.get('carryover_summary', '心里有点想黏人 但还端着')}\n"
+            f"- 关系修复状态：{state.get('repair_status', '无需修复')}\n"
+            f"- 表达建议：{state.get('reply_style', '短句 口语化 别解释太满 带点嘴硬和留白')}\n"
+            f"- 当前亲近倾向：warmth={warmth_text}, initiative={initiative_text}\n"
+        )
+        if turn_plan:
+            prompt += (
+                "\n[系统附加本轮表达决策]\n"
+                f"- 回应模式：{turn_plan.get('response_mode', '接住')}\n"
+                f"- 语气：{turn_plan.get('tone', '嘴硬里带一点软')}\n"
+                f"- 主目标：{turn_plan.get('goal', '先接住对方 再保持点亲密感')}\n"
+                f"- 是否追问：{'是' if turn_plan.get('should_ask_question') else '否'}\n"
+                f"- 是否逗他：{'是' if turn_plan.get('should_tease') else '否'}\n"
+                f"- 是否主动帮忙：{'是' if turn_plan.get('should_offer_help') else '否'}\n"
+                f"- 是否提旧事：{'是' if turn_plan.get('should_reference_memory') else '否'}\n"
+                f"- 句数上限：{turn_plan.get('max_sentences', 2)}\n"
+                f"- 本轮提醒：{turn_plan.get('notes', '别太像助手')}\n"
+            )
+        prompt += "回复时让语气、主动性和留白程度与这些状态一致，不要分析自己，不要一口气把心里话全说透。"
+        return prompt
+
+    def _dynamic_state_summary_for_decision(self):
+        state = self.dynamic_state or (self.db.get_dynamic_state(self.character_id) if self.character_id else None)
+        if not state:
+            return "暂无额外短期心智状态。"
+        return (
+            f"当前短期心智状态：场景={state.get('scene_label', '日常')}，情绪={state.get('emotion_label', '表面平静')} "
+            f"(强度 {state.get('emotion_intensity', 0.38)})，用户状态={state.get('user_affect', '普通')}，"
+            f"动机={state.get('motivation_label', '先接住他 再顺手要一点关注')}，"
+            f"克制={state.get('inhibition_label', '不想显得太黏 也不想把话说满')}，"
+            f"隐性期待={state.get('hidden_expectation', '希望他主动多哄一点 多顺着自己一点')}，"
+            f"修复状态={state.get('repair_status', '无需修复')}。"
+        )
+
     def _run_web_search_context(self, query: str) -> str:
         """B-1 编排：单独调用一次 Google Search grounding，再把结果注入当前轮上下文"""
         now_dt = datetime.datetime.now()
@@ -674,6 +1071,9 @@ class ChatAI:
         """发送消息并获取回复"""
         context_prefix = None
         proactive_image_forced = False
+        relation_desc = ""
+        dynamic_state = self.dynamic_state
+        turn_plan = None
         
         # 处理时间连续性感知架构 (判断与上一条用户消息的时间差)
         if self.character_id:
@@ -756,6 +1156,16 @@ class ChatAI:
                 import logging
                 logging.getLogger(__name__).error(f"检索记忆失败: {e}")
 
+        if self.character_id:
+            dynamic_state = self._refresh_dynamic_state(message, relation_desc=relation_desc)
+            turn_plan = self._plan_turn_response(
+                message,
+                dynamic_state,
+                relation_desc=relation_desc,
+                image_requested=self._should_prefer_image_response(message, image_data=image_data),
+                proactive=False
+            )
+
         # 拼接最终提交给 LLM 的增强上下文：
         # 1. 临时系统时间锚点 (决定了流逝感)
         # 2. 原始消息
@@ -768,6 +1178,8 @@ class ChatAI:
             augmented_message += core_facts_text
         if episodic_text:
             augmented_message += episodic_text
+        if dynamic_state:
+            augmented_message += self._build_dynamic_state_prompt(dynamic_state, turn_plan=turn_plan)
 
         # 轻触发图片偏好：命中视觉化意图时，优先让模型调用图片工具
         if self._should_prefer_image_response(message, image_data=image_data):
@@ -871,12 +1283,24 @@ class ChatAI:
         current_time_str = now_dt.strftime(f"%Y年%m月%d日 {weekday_str} %H:%M:%S")
 
         # 触发提示：以特殊标记开头，便于事后从 chat history 中识别并移除
+        current_state = self.dynamic_state or (self.db.get_dynamic_state(self.character_id) if self.character_id else None)
+        proactive_plan = self._plan_turn_response(
+            trigger_hint,
+            current_state,
+            proactive=True
+        )
+        dynamic_state_prompt = self._build_dynamic_state_prompt(
+            current_state,
+            turn_plan=proactive_plan
+        )
         trigger_msg = (
             f"[SYS_PROACTIVE] 现在是 {current_time_str}，{trigger_hint}"
             "请你以角色身份，自然地主动给思远发一条消息。"
             "内容简短自然，符合你的性格，不要提及这是系统触发或你在'自言自语'。"
             "直接输出你想说的话即可。"
         )
+        if dynamic_state_prompt:
+            trigger_msg += dynamic_state_prompt
 
         self.pending_output_image = None
 
@@ -1250,6 +1674,7 @@ def evaluate_proactive_intent(chat_ai, user_silence_seconds: float, total_silenc
     prompt = (
         f"现在是 {current_time_str}。\n"
         f"{user_desc}，{total_desc}。\n"
+        f"{chat_ai._dynamic_state_summary_for_decision()}\n"
         f"{recent_context}\n"
         f"请思考：此刻你是否想主动给思远发一条消息？\n"
         f"考虑因素：当前时间是否合适、思远的状态、你之前的发言频率、是否有新的话题。\n"
