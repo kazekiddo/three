@@ -258,6 +258,63 @@ class Database:
             )
             return cur.fetchall()
 
+    def delete_messages_from_last_user(self, character_id=None):
+        """删除从最后一条 user 消息开始（含该条）的所有消息；character_id 为空时按全表处理。"""
+        conn = self.connect()
+        try:
+            with conn.cursor() as cur:
+                if character_id is None:
+                    cur.execute(
+                        """SELECT MAX(id)
+                           FROM chat_messages
+                           WHERE role = 'user'"""
+                    )
+                else:
+                    cur.execute(
+                        """SELECT MAX(id)
+                           FROM chat_messages
+                           WHERE character_id = %s
+                             AND role = 'user'""",
+                        (character_id,)
+                    )
+                row = cur.fetchone()
+                last_user_id = row[0] if row and row[0] is not None else None
+                if last_user_id is None:
+                    return {"last_user_id": None, "deleted_count": 0, "media_paths": []}
+
+                if character_id is None:
+                    cur.execute(
+                        """DELETE FROM chat_messages
+                           WHERE id >= %s
+                           RETURNING media_path""",
+                        (last_user_id,)
+                    )
+                else:
+                    cur.execute(
+                        """DELETE FROM chat_messages
+                           WHERE character_id = %s
+                             AND id >= %s
+                           RETURNING media_path""",
+                        (character_id, last_user_id)
+                    )
+                deleted_rows = cur.fetchall()
+                conn.commit()
+
+                media_paths = []
+                for item in deleted_rows:
+                    path = item[0] if item and len(item) > 0 else None
+                    if path:
+                        media_paths.append(path)
+
+                return {
+                    "last_user_id": last_user_id,
+                    "deleted_count": len(deleted_rows),
+                    "media_paths": media_paths
+                }
+        except Exception:
+            conn.rollback()
+            raise
+
 
     def save_episodic_memory(self, character_id, content, emotion_intensity, promotion_candidate=True, embedding=None, event_time=None, causal_link_id=None, emotion_category=None):
         """保存提纯后的情景记忆（支持因果链和情绪分类）"""
