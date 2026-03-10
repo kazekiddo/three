@@ -2393,7 +2393,7 @@ def _schedule_next_proactive_check(context):
 
 async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
     """AI 自主意愿检查：evaluate → generate → send，完成后动态安排下一次检查。
-    - 夜间（北京时间 0:00~7:00）静默，不发消息
+    - 夜间（北京时间 0:00~8:00）静默，不发消息
     - 沉默不足 30 分钟不打扰
     - AI 自己决定要不要发，内容也是 AI 自己生成
     - 打字延迟模拟与普通消息一致
@@ -2406,9 +2406,9 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
             f"user_chats={len(user_chats)}"
         )
 
-        # 夜间屏蔽（凌晨 0~7 点不打扰，直接跳过，finally 会安排下次）
-        if 0 <= now_dt.hour < 7:
-            logger.error("[proactive_check] skipped due to night hours (0-7)")
+        # 夜间屏蔽（凌晨 0~8 点不打扰，直接跳过，finally 会安排下次）
+        if 0 <= now_dt.hour < 8:
+            logger.error("[proactive_check] skipped due to night hours (0-8)")
             return
 
         for user_id, chat_ai in list(user_chats.items()):
