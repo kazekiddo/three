@@ -223,13 +223,41 @@ class ChatAI:
             has_user_anchor = ("photo_siyuan" in text) or ("siyuan.jpg" in text)
             # 英文用词边界匹配，避免 woman 中误匹配 man
             has_boy_word = _has_any_word(
-                [r"\bboy\b", r"\bman\b", r"\byoung\s+man\b", r"\bmale\b"],
+                [
+                    r"\bboy\b",
+                    r"\bman\b",
+                    r"\byoung\s+man\b",
+                    r"\bmale\b",
+                    r"\bboyfriend\b",
+                    r"\bboy[-\s]?friend\b",
+                    r"\bbf\b",
+                    r"\bpartner\b",
+                    r"\blover\b",
+                    r"\bsignificant\s+other\b",
+                ],
                 text
-            ) or _has_any_substring(["男生", "男孩", "男人", "少年"], text)
+            ) or _has_any_substring(
+                ["男生", "男孩", "男人", "少年", "男朋友", "情侣", "恋人", "对象", "伴侣", "男女朋友"],
+                text
+            )
             has_girl_word = _has_any_word(
-                [r"\bgirl\b", r"\bwoman\b", r"\byoung\s+woman\b", r"\bfemale\b"],
+                [
+                    r"\bgirl\b",
+                    r"\bwoman\b",
+                    r"\byoung\s+woman\b",
+                    r"\bfemale\b",
+                    r"\bgirlfriend\b",
+                    r"\bgirl[-\s]?friend\b",
+                    r"\bgf\b",
+                    r"\bpartner\b",
+                    r"\blover\b",
+                    r"\bsignificant\s+other\b",
+                ],
                 text
-            ) or _has_any_substring(["女生", "女孩", "女人", "少女"], text)
+            ) or _has_any_substring(
+                ["女生", "女孩", "女人", "少女", "女朋友", "情侣", "恋人", "对象", "伴侣", "男女朋友"],
+                text
+            )
             if has_char_anchor and has_user_anchor:
                 return "both"
             # 明确出现 boy + girl 时，直接视为双人图
@@ -242,9 +270,23 @@ class ChatAI:
             ]
             if has_char_anchor and any(k in text for k in dual_interaction_keywords):
                 if _has_any_word(
-                    [r"\byoung\s+man\b", r"\bman\b", r"\bboy\b", r"\bmale\b"],
+                    [
+                        r"\byoung\s+man\b",
+                        r"\bman\b",
+                        r"\bboy\b",
+                        r"\bmale\b",
+                        r"\bboyfriend\b",
+                        r"\bboy[-\s]?friend\b",
+                        r"\bbf\b",
+                        r"\bpartner\b",
+                        r"\blover\b",
+                        r"\bsignificant\s+other\b",
+                    ],
                     text
-                ) or _has_any_substring(["男生", "男人", "男孩", "少年", "他"], text):
+                ) or _has_any_substring(
+                    ["男生", "男人", "男孩", "少年", "他", "男朋友", "情侣", "恋人", "对象", "伴侣", "男女朋友"],
+                    text
+                ):
                     return "both"
             if has_char_anchor:
                 return "character_only"
