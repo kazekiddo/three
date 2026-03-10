@@ -258,7 +258,26 @@ class ChatAI:
                 ["女生", "女孩", "女人", "少女", "女朋友", "情侣", "恋人", "对象", "伴侣", "男女朋友"],
                 text
             )
+            both_keywords = [
+                "我们", "一起", "同框", "合照", "你和我", "我和你", "咱俩", "两个人",
+                "both of us", "you and me", "me and you", "with siyuan", "with the user", "couple shot"
+            ]
+            # 这里避免使用裸词 you / me，减少误判为双人图
+            character_keywords = [
+                "你自己", "小七", "xiaoqi", "xiao qi", "nanase",
+                "the girl", "the character", "你的照片", "你的样子", "自拍",
+                "solo girl", "girl only", "character only"
+            ]
+            user_keywords = [
+                "我自己", "思远", "siyuan", "the user", "user only", "我的照片",
+                "我长什么样", "给我画", "my portrait", "draw me", "me only"
+            ]
+
             if has_char_anchor and has_user_anchor:
+                return "both"
+            if has_char_anchor and (any(k in text for k in user_keywords) or any(k in text for k in both_keywords)):
+                return "both"
+            if has_user_anchor and (any(k in text for k in character_keywords) or any(k in text for k in both_keywords)):
                 return "both"
             # 明确出现 boy + girl 时，直接视为双人图
             if has_boy_word and has_girl_word:
@@ -298,20 +317,6 @@ class ChatAI:
                 "纯场景", "纯物体", "只有物体", "静物", "产品图",
                 "landscape only", "scenery only", "no people", "without people",
                 "object only", "still life", "product shot"
-            ]
-            both_keywords = [
-                "我们", "一起", "同框", "合照", "你和我", "我和你", "咱俩", "两个人",
-                "both of us", "you and me", "me and you", "with siyuan", "with the user", "couple shot"
-            ]
-            # 这里避免使用裸词 you / me，减少误判为双人图
-            character_keywords = [
-                "你自己", "小七", "xiaoqi", "xiao qi", "nanase",
-                "the girl", "the character", "你的照片", "你的样子", "自拍",
-                "solo girl", "girl only", "character only"
-            ]
-            user_keywords = [
-                "我自己", "思远", "siyuan", "the user", "user only", "我的照片",
-                "我长什么样", "给我画", "my portrait", "draw me", "me only"
             ]
             person_keywords = [
                 "人", "人物", "女生", "女孩", "男生", "肖像", "自拍", "半身", "全身",
