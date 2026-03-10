@@ -2387,14 +2387,20 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
     import asyncio
     try:
         now_dt = datetime.datetime.now()
+        logger.error(
+            f"[proactive_check] tick at {now_dt.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"user_chats={len(user_chats)}"
+        )
 
         # 夜间屏蔽（凌晨 0~7 点不打扰，直接跳过，finally 会安排下次）
         if 0 <= now_dt.hour < 7:
+            logger.error("[proactive_check] skipped due to night hours (0-7)")
             return
 
         for user_id, chat_ai in list(user_chats.items()):
             try:
                 if not chat_ai.can_send_proactive_today(now_dt):
+                    logger.error(f"[proactive_check] user={user_id} blocked_today")
                     continue
 
                 # 用用户最后说话时间计算沉默时长，AI 主动发言不重置这个门槛
@@ -2404,14 +2410,22 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                 # 增加总互动沉默时长，用于 AI 评估频率
                 last_total_ts = chat_ai.last_message_timestamp
                 total_silence_seconds = (now_dt - last_total_ts).total_seconds() if last_total_ts else 86400
+                logger.error(
+                    f"[proactive_check] user={user_id} "
+                    f"user_silence={user_silence_seconds:.0f}s "
+                    f"total_silence={total_silence_seconds:.0f}s"
+                )
 
                 # 用户刚说过话（30 分钟内），不主动打扰；AI 自己发的不算
                 if user_silence_seconds < 1800:
+                    logger.error(f"[proactive_check] user={user_id} skip (user_silence < 1800s)")
                     continue
 
                 # 意愿评估（同步调用，独立 client，不污染 chat history）
+                logger.error(f"[proactive_check] user={user_id} calling evaluate_proactive_intent")
                 should_send, trigger_hint = evaluate_proactive_intent(chat_ai, user_silence_seconds, total_silence_seconds)
                 if not should_send:
+                    logger.error(f"[proactive_check] user={user_id} evaluate_proactive_intent=NO")
                     continue
 
                 # AI 生成主动消息（同步调用）
