@@ -209,29 +209,43 @@ class ChatAI:
             if not text:
                 return "none"
 
+            def _has_any_word(patterns, haystack: str) -> bool:
+                for p in patterns:
+                    if re.search(p, haystack):
+                        return True
+                return False
+
+            def _has_any_substring(words, haystack: str) -> bool:
+                return any(w in haystack for w in words)
+
             # 文件名锚点优先级最高：直接用设定图名决定主体
             has_char_anchor = ("photo_nanase" in text) or ("nanase.jpg" in text)
             has_user_anchor = ("photo_siyuan" in text) or ("siyuan.jpg" in text)
-            has_boy_word = any(k in text for k in ["boy", "man","young man", "male", "男生", "男孩", "男人", "少年"])
-            has_girl_word = any(k in text for k in ["girl", "woman","young woman", "female", "女生", "女孩", "女人", "少女"])
+            # 英文用词边界匹配，避免 woman 中误匹配 man
+            has_boy_word = _has_any_word(
+                [r"\bboy\b", r"\bman\b", r"\byoung\s+man\b", r"\bmale\b"],
+                text
+            ) or _has_any_substring(["男生", "男孩", "男人", "少年"], text)
+            has_girl_word = _has_any_word(
+                [r"\bgirl\b", r"\bwoman\b", r"\byoung\s+woman\b", r"\bfemale\b"],
+                text
+            ) or _has_any_substring(["女生", "女孩", "女人", "少女"], text)
             if has_char_anchor and has_user_anchor:
                 return "both"
             # 明确出现 boy + girl 时，直接视为双人图
             if has_boy_word and has_girl_word:
                 return "both"
             # 仅给角色锚点，但语义明确是双人互动时，也判为双人
-            likely_second_person_keywords = [
-                "young man", "man", "boy", "male",
-                "男生", "男人", "男孩", "少年", "他"
-            ]
             dual_interaction_keywords = [
                 "hug", "hugging", "embrace", "from behind", "couple", "intimate", "romantic",
                 "抱", "拥抱", "搂", "从背后", "同框", "情侣", "亲密"
             ]
-            if has_char_anchor and any(k in text for k in likely_second_person_keywords) and any(
-                k in text for k in dual_interaction_keywords
-            ):
-                return "both"
+            if has_char_anchor and any(k in text for k in dual_interaction_keywords):
+                if _has_any_word(
+                    [r"\byoung\s+man\b", r"\bman\b", r"\bboy\b", r"\bmale\b"],
+                    text
+                ) or _has_any_substring(["男生", "男人", "男孩", "少年", "他"], text):
+                    return "both"
             if has_char_anchor:
                 return "character_only"
             if has_user_anchor:
