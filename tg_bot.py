@@ -28,6 +28,13 @@ load_dotenv()
 MEDIA_DIR = os.path.join(os.getcwd(), 'media', 'photos')
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
+DEFAULT_CHAT_MODEL = "gemini-3-flash-preview"
+SUPPORTED_CHAT_MODELS = [
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-2.5-flash",
+]
+
 def _parse_time_range(message):
     """从用户消息中解析时间范围关键词，返回 (time_start, time_end) 或 (None, None)"""
     now = datetime.datetime.now()
@@ -123,7 +130,7 @@ def _parse_time_range(message):
 
 
 class ChatAI:
-    def __init__(self, model="gemini-3-flash-preview", api_key=None, system_instruction=None, character_id=None):
+    def __init__(self, model=DEFAULT_CHAT_MODEL, api_key=None, system_instruction=None, character_id=None):
         """初始化聊天AI"""
         if api_key is None:
             api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')
@@ -1951,6 +1958,7 @@ class ChatAI:
 
 # 全局变量存储每个用户的聊天实例
 user_chats = {}
+user_model_prefs = {}
 ALLOWED_USER_ID = 569020802
 
 async def check_permission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -2018,6 +2026,7 @@ async def select_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 创建新的聊天实例
     try:
         user_chats[user_id] = ChatAI(
+            model=user_model_prefs.get(user_id, DEFAULT_CHAT_MODEL),
             system_instruction=character['system_instruction'],
             character_id=character_id
         )
@@ -2027,6 +2036,31 @@ async def select_character(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"创建聊天失败：{str(e)}")
     
     db.close()
+
+async def use_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /useModel 命令，切换对话模型"""
+    user_id = update.effective_user.id
+
+    if not context.args:
+        current = user_model_prefs.get(user_id, DEFAULT_CHAT_MODEL)
+        if user_id in user_chats:
+            current = user_chats[user_id].model
+        models_text = "\n".join(SUPPORTED_CHAT_MODELS)
+        await update.message.reply_text(
+            f"当前模型：{current}\n可用模型：\n{models_text}\n用法：/useModel <模型名>"
+        )
+        return
+
+    model = context.args[0].strip()
+    if model not in SUPPORTED_CHAT_MODELS:
+        models_text = "\n".join(SUPPORTED_CHAT_MODELS)
+        await update.message.reply_text(f"不支持的模型：{model}\n可用模型：\n{models_text}")
+        return
+
+    user_model_prefs[user_id] = model
+    if user_id in user_chats:
+        user_chats[user_id].model = model
+    await update.message.reply_text(f"已切换模型：{model}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户消息"""
@@ -2289,6 +2323,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 <b>可用命令列表</b>\n\n"
         "/start - 显示所有可用角色列表\n"
         "/select &lt;角色ID&gt; - 选择一个角色开始聊天\n"
+        "/useModel &lt;模型名&gt; - 切换对话模型\n"
         "/history - 查看与当前角色的最近 10 条历史记录\n"
         "/del - 全表删除从最后一条 user 消息开始（含该条）的所有聊天记录，并清理关联媒体文件\n"
         "/filter - 手动触发抽取情景记忆任务 (后台运行)\n"
@@ -2581,6 +2616,8 @@ def main():
     # 添加处理器
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("select", select_character))
+    application.add_handler(CommandHandler("useModel", use_model))
+    application.add_handler(CommandHandler("usemodel", use_model))
     application.add_handler(CommandHandler("history", history))
     application.add_handler(CommandHandler("del", delete_from_last_user))
     application.add_handler(CommandHandler("filter", trigger_filter))
