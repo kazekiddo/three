@@ -583,6 +583,23 @@ class ChatAI:
             history=history
         )
 
+    def _build_chat_config(self):
+        config = {'automatic_function_calling': {}}
+        if self.system_instruction:
+            config['system_instruction'] = self.system_instruction
+        config['tools'] = self.tools
+        return config
+
+    def switch_model(self, new_model: str):
+        """切换对话模型并重建 chat，会尽量保留当前对话历史。"""
+        self.model = new_model
+        history = getattr(self.chat, '_curated_history', None) or self.base_history
+        self.chat = self.client.chats.create(
+            model=self.model,
+            config=self._build_chat_config(),
+            history=history
+        )
+
     def _ensure_proactive_day_state(self, now_dt: datetime.datetime):
         today = now_dt.date()
         if self.proactive_streak_date != today:
@@ -1568,14 +1585,9 @@ class ChatAI:
         """每天凌晨清空一次内存中的长对话列表，同时保留工具能力"""
         logger.info(f"正在清空角色 {self.character_id} 的短期对话感知缓冲...")
         
-        config = {'automatic_function_calling': {}}
-        if self.system_instruction:
-            config['system_instruction'] = self.system_instruction
-        config['tools'] = self.tools
-
         self.chat = self.client.chats.create(
             model=self.model,
-            config=config,
+            config=self._build_chat_config(),
             history=self.base_history
         )
     
@@ -2059,7 +2071,7 @@ async def use_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_model_prefs[user_id] = model
     if user_id in user_chats:
-        user_chats[user_id].model = model
+        user_chats[user_id].switch_model(model)
     await update.message.reply_text(f"已切换模型：{model}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
