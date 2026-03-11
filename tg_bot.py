@@ -591,14 +591,26 @@ class ChatAI:
         )
 
     def _build_chat_config(self):
+        def _set_field(cfg, model_cls, key, alt_key, value):
+            try:
+                fields = getattr(model_cls, "model_fields", None) or {}
+                if key in fields:
+                    cfg[key] = value
+                elif alt_key in fields:
+                    cfg[alt_key] = value
+            except Exception:
+                pass
+
         if self.cached_content_name:
-            return {'cachedContent': self.cached_content_name}
+            cfg = {}
+            _set_field(cfg, types.GenerateContentConfig, "cachedContent", "cached_content", self.cached_content_name)
+            return cfg
         config = {
             'automaticFunctionCalling': types.AutomaticFunctionCallingConfig(),
             'tools': self.tools
         }
         if self.system_instruction:
-            config['systemInstruction'] = self.system_instruction
+            _set_field(config, types.GenerateContentConfig, "systemInstruction", "system_instruction", self.system_instruction)
         return config
 
     def _log_cache_usage(self, response, context_label: str):
@@ -747,7 +759,11 @@ class ChatAI:
                 )
             )
             if self.system_instruction:
-                config.systemInstruction = self.system_instruction
+                if hasattr(config, "model_fields"):
+                    if "systemInstruction" in config.model_fields:
+                        config.systemInstruction = self.system_instruction
+                    elif "system_instruction" in config.model_fields:
+                        config.system_instruction = self.system_instruction
             cache = self.client.caches.create(
                 model=self.model,
                 config=config
