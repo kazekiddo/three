@@ -855,6 +855,34 @@ class ChatAI:
         except Exception as e:
             logger.error(f"轮换缓存失败: {e}")
 
+    def rebuild_cache_now(self):
+        """立即重建缓存：把当前 chat 历史全部并入缓存前缀并替换旧缓存。"""
+        if not self.enable_prompt_cache or not self.cached_tools:
+            return False, "缓存未启用或工具未就绪"
+        try:
+            segment = self._history_to_dicts(getattr(self.chat, "_curated_history", []))
+            old_prefix = self.cached_prefix_history
+            old_cache_name = self.cached_content_name
+            if segment:
+                self.cached_prefix_history = (self.cached_prefix_history or []) + segment
+            self.cached_content_name = None
+            self._init_prompt_cache()
+            if not self.cached_content_name:
+                self.cached_prefix_history = old_prefix
+                return False, "创建缓存失败"
+            if old_cache_name and old_cache_name != self.cached_content_name:
+                self._delete_cached_content(old_cache_name)
+            self.chat = self.client.chats.create(
+                model=self.model,
+                config=self._build_chat_config(),
+                history=[]
+            )
+            self.cache_pending_messages = 0
+            return True, "缓存已重建"
+        except Exception as e:
+            logger.error(f"手动重建缓存失败: {e}")
+            return False, f"重建失败: {str(e)}"
+
     def switch_model(self, new_model: str):
         """切换对话模型并重建 chat，会尽量保留当前对话历史。"""
         self.model = new_model
@@ -2631,6 +2659,25 @@ async def trigger_hourly_care_extract(update: Update, context: ContextTypes.DEFA
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"整点关怀提取任务执行失败: {str(e)}")
     asyncio.create_task(run_task())
 
+async def trigger_rebuild_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /rebuild_cache 命令：立即重建缓存"""
+    if not user_chats:
+        await update.message.reply_text("当前没有活跃聊天实例，无法重建缓存。")
+        return
+    processed = 0
+    failed = 0
+    for _, chat_ai in list(user_chats.items()):
+        try:
+            ok, msg = chat_ai.rebuild_cache_now()
+            if ok:
+                processed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            logger.error(f"/rebuild_cache 失败: {e}")
+            failed += 1
+    await update.message.reply_text(f"缓存重建完成：成功 {processed}，失败 {failed}")
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /help 命令，显示所有可用命令"""
     help_text = (
@@ -2643,6 +2690,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/filter - 手动触发抽取情景记忆任务 (后台运行)\n"
         "/consolidate - 手动触发巩固核心人格任务 (后台运行)\n"
         "/care_extract [小时] - 手动触发整点关怀提取任务，默认最近 1 小时 (后台运行)\n"
+        "/rebuild_cache - 立即重建缓存（后台实例全部重建）\n"
         "/help - 显示此帮助信息"
     )
     await update.message.reply_text(help_text, parse_mode='HTML')
@@ -2937,6 +2985,7 @@ def main():
     application.add_handler(CommandHandler("filter", trigger_filter))
     application.add_handler(CommandHandler("consolidate", trigger_consolidate))
     application.add_handler(CommandHandler("care_extract", trigger_hourly_care_extract))
+    application.add_handler(CommandHandler("rebuild_cache", trigger_rebuild_cache))
     application.add_handler(CommandHandler("help", help_command))
     # 更新过滤器，支持文字和图片（MESSAGE_TYPE.PHOTO）
     application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_message))
