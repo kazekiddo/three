@@ -556,6 +556,7 @@ class ChatAI:
             "register_reminder": register_reminder
         }
         self.cached_tools = None
+        self.cached_prefix_history = []
         self.pending_output_image = None
         
         # 创建聊天
@@ -735,6 +736,17 @@ class ChatAI:
             items.append((role, "\n".join(texts)))
         return items
 
+    def _history_to_dicts(self, history):
+        items = []
+        for content in history or []:
+            if hasattr(content, "model_dump"):
+                items.append(content.model_dump(exclude_none=True))
+            elif isinstance(content, dict):
+                items.append(content)
+            else:
+                items.append(content)
+        return items
+
     def _strip_base_history(self, history):
         if not history or not self.base_history:
             return history or []
@@ -765,7 +777,7 @@ class ChatAI:
                 cfg["display_name"] = display_name
 
             if "contents" in fields:
-                cfg["contents"] = self.base_history
+                cfg["contents"] = self.base_history + (self.cached_prefix_history or [])
 
             if "ttl" in fields:
                 cfg["ttl"] = self.prompt_cache_ttl
@@ -799,6 +811,33 @@ class ChatAI:
             logger.error(f"创建提示词缓存失败: {e}")
             self.cached_content_name = None
 
+    def _rotate_cache_before_time_anchor(self):
+        if not self.enable_prompt_cache or not self.cached_tools:
+            return
+        try:
+            segment = self._history_to_dicts(getattr(self.chat, "_curated_history", []))
+            if not segment:
+                return
+            new_prefix = list(self.cached_prefix_history or [])
+            new_prefix.extend(segment)
+            # 尝试创建新缓存（包含原有缓存前缀 + 本次历史）
+            old_prefix = self.cached_prefix_history
+            self.cached_prefix_history = new_prefix
+            self.cached_content_name = None
+            self._init_prompt_cache()
+            if not self.cached_content_name:
+                # 失败则回滚前缀，保留原 chat 历史
+                self.cached_prefix_history = old_prefix
+                return
+            # 缓存成功：重建 chat，仅保留后续新增历史
+            self.chat = self.client.chats.create(
+                model=self.model,
+                config=self._build_chat_config(),
+                history=[]
+            )
+        except Exception as e:
+            logger.error(f"轮换缓存失败: {e}")
+
     def switch_model(self, new_model: str):
         """切换对话模型并重建 chat，会尽量保留当前对话历史。"""
         self.model = new_model
@@ -806,6 +845,10 @@ class ChatAI:
         self.cached_content_name = None
         if self.enable_prompt_cache:
             self.cached_tools = self._build_cached_tools()
+            # 把当前 chat 历史并入缓存前缀，保证不丢对话
+            extra = self._history_to_dicts(getattr(self.chat, "_curated_history", []))
+            if extra:
+                self.cached_prefix_history = (self.cached_prefix_history or []) + extra
             self._init_prompt_cache()
         self.chat = self.client.chats.create(
             model=self.model,
@@ -1798,6 +1841,7 @@ class ChatAI:
         """每天凌晨清空一次内存中的长对话列表，同时保留工具能力"""
         logger.info(f"正在清空角色 {self.character_id} 的短期对话感知缓冲...")
         self.cached_content_name = None
+        self.cached_prefix_history = []
         if self.enable_prompt_cache:
             self.cached_tools = self._build_cached_tools()
             self._init_prompt_cache()
@@ -1836,6 +1880,8 @@ class ChatAI:
                 
                 # 更新上一次插入时间后缀的锚点
                 self.last_prefix_timestamp = now_dt
+                if self.cached_content_name:
+                    self._rotate_cache_before_time_anchor()
             
             # 更新上次说话时间（用户侧）
             self.last_message_timestamp = now_dt
