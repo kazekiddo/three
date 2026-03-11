@@ -554,7 +554,6 @@ class ChatAI:
         self.pending_output_image = None
         
         # 创建聊天
-        config = {'automatic_function_calling': {}}
         if system_instruction:
             # 追加图片工具使用约束，防止模型试图直接输出图片
             image_constraint = (
@@ -576,8 +575,6 @@ class ChatAI:
                 "记住，你一旦调用了工具，就代表你‘真的答应了’，这种承诺对你来说是很正式的，要表现出那种‘虽然很麻烦但为了你还是破例一次’的傲娇感。"
             )
             self.system_instruction = system_instruction + image_constraint + reminder_constraint
-            config['system_instruction'] = self.system_instruction
-        config['tools'] = self.tools
         self.cached_content_name = None
         if self.enable_prompt_cache:
             self._init_prompt_cache()
@@ -588,12 +585,17 @@ class ChatAI:
         )
 
     def _build_chat_config(self):
-        config = {'automatic_function_calling': {}}
-        if self.system_instruction:
-            config['system_instruction'] = self.system_instruction
-        config['tools'] = self.tools
         if self.cached_content_name:
-            config['cached_content'] = self.cached_content_name
+            return {
+                'cachedContent': self.cached_content_name,
+                'automaticFunctionCalling': types.AutomaticFunctionCallingConfig()
+            }
+        config = {
+            'automaticFunctionCalling': types.AutomaticFunctionCallingConfig(),
+            'tools': self.tools
+        }
+        if self.system_instruction:
+            config['systemInstruction'] = self.system_instruction
         return config
 
     def _log_cache_usage(self, response, context_label: str):
@@ -649,12 +651,18 @@ class ChatAI:
         try:
             display_name = f"tg_bot_prefix_cache_{self.character_id or 'default'}_{self.model}"
             config = types.CreateCachedContentConfig(
-                display_name=display_name,
+                displayName=display_name,
                 contents=self.base_history,
-                ttl=self.prompt_cache_ttl
+                ttl=self.prompt_cache_ttl,
+                tools=self.tools,
+                toolConfig=types.ToolConfig(
+                    functionCallingConfig=types.FunctionCallingConfig(
+                        mode=types.FunctionCallingConfigMode.AUTO
+                    )
+                )
             )
             if self.system_instruction:
-                config.system_instruction = self.system_instruction
+                config.systemInstruction = self.system_instruction
             cache = self.client.caches.create(
                 model=self.model,
                 config=config
