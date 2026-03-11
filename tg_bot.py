@@ -1970,7 +1970,8 @@ class ChatAI:
                 if core_facts:
                     core_facts_text = "\n\n[系统附加背景记忆：根据长期互动，关于该用户的核心特质（供参考）]\n"
                     for i, fact in enumerate(core_facts):
-                        evidence = f" (依据: {fact['evidence_span']})" if fact.get('evidence_span') else ""
+                        # evidence = f" (依据: {fact['evidence_span']})" if fact.get('evidence_span') else ""
+                        evidence = ""
                         core_facts_text += f"{i+1}. {fact['fact_text']}{evidence}\n"
                 
                 # 解析用户消息中的时间意图
