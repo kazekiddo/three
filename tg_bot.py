@@ -559,6 +559,10 @@ class ChatAI:
         self.cached_prefix_history = []
         self.cache_rotate_min_messages = 50
         self.cache_pending_messages = 0
+        self.cache_rotate_min_prompt_delta = 4000
+        self.last_prompt_tokens = None
+        self.last_cached_tokens = None
+        self.last_prompt_delta = None
         self.pending_output_image = None
         
         # 创建聊天
@@ -661,10 +665,29 @@ class ChatAI:
             if cached_tokens is None and total_tokens is None:
                 return
 
+            if input_tokens is not None:
+                self.last_prompt_tokens = input_tokens
+            if cached_tokens is not None:
+                self.last_cached_tokens = cached_tokens
+            if input_tokens is not None and cached_tokens is not None:
+                self.last_prompt_delta = input_tokens - cached_tokens
+
             logger.error(
                 f"[cache] {context_label} cached_tokens={cached_tokens} "
                 f"prompt_tokens={input_tokens} output_tokens={output_tokens} total_tokens={total_tokens}"
             )
+
+            if (
+                self.cached_content_name
+                and self.last_prompt_delta is not None
+                and self.last_prompt_delta > self.cache_rotate_min_prompt_delta
+                and "_tool_followup" not in context_label
+            ):
+                ok, msg = self.rebuild_cache_now()
+                logger.error(
+                    f"[cache] auto_rebuild delta={self.last_prompt_delta} "
+                    f"threshold={self.cache_rotate_min_prompt_delta} ok={ok}"
+                )
         except Exception:
             pass
 
