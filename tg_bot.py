@@ -587,7 +587,7 @@ class ChatAI:
         self.chat = self.client.chats.create(
             model=model,
             config=self._build_chat_config(),
-            history=[] if self.cached_content_name else history
+            history=self._strip_base_history(history) if self.cached_content_name else history
         )
 
     def _build_chat_config(self):
@@ -735,6 +735,15 @@ class ChatAI:
             items.append((role, "\n".join(texts)))
         return items
 
+    def _strip_base_history(self, history):
+        if not history or not self.base_history:
+            return history or []
+        if len(history) < len(self.base_history):
+            return history
+        if self._normalize_history_text(history[:len(self.base_history)]) == self._normalize_history_text(self.base_history):
+            return history[len(self.base_history):]
+        return history
+
     def _is_base_history(self, history):
         if not history:
             return True
@@ -747,23 +756,40 @@ class ChatAI:
             display_name = f"tg_bot_prefix_cache_{self.character_id or 'default'}_{self.model}"
             if not self.cached_tools:
                 raise ValueError("cached_tools 未就绪")
-            config = types.CreateCachedContentConfig(
-                displayName=display_name,
-                contents=self.base_history,
-                ttl=self.prompt_cache_ttl,
-                tools=self.cached_tools,
-                toolConfig=types.ToolConfig(
-                    functionCallingConfig=types.FunctionCallingConfig(
-                        mode=types.FunctionCallingConfigMode.AUTO
-                    )
+
+            fields = getattr(types.CreateCachedContentConfig, "model_fields", None) or {}
+            cfg = {}
+            if "displayName" in fields:
+                cfg["displayName"] = display_name
+            elif "display_name" in fields:
+                cfg["display_name"] = display_name
+
+            if "contents" in fields:
+                cfg["contents"] = self.base_history
+
+            if "ttl" in fields:
+                cfg["ttl"] = self.prompt_cache_ttl
+
+            if "tools" in fields:
+                cfg["tools"] = self.cached_tools
+
+            tool_config = types.ToolConfig(
+                functionCallingConfig=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.AUTO
                 )
             )
+            if "toolConfig" in fields:
+                cfg["toolConfig"] = tool_config
+            elif "tool_config" in fields:
+                cfg["tool_config"] = tool_config
+
             if self.system_instruction:
-                if hasattr(config, "model_fields"):
-                    if "systemInstruction" in config.model_fields:
-                        config.systemInstruction = self.system_instruction
-                    elif "system_instruction" in config.model_fields:
-                        config.system_instruction = self.system_instruction
+                if "systemInstruction" in fields:
+                    cfg["systemInstruction"] = self.system_instruction
+                elif "system_instruction" in fields:
+                    cfg["system_instruction"] = self.system_instruction
+
+            config = types.CreateCachedContentConfig(**cfg)
             cache = self.client.caches.create(
                 model=self.model,
                 config=config
@@ -784,7 +810,7 @@ class ChatAI:
         self.chat = self.client.chats.create(
             model=self.model,
             config=self._build_chat_config(),
-            history=[] if (self.cached_content_name and self._is_base_history(history)) else history
+            history=self._strip_base_history(history) if self.cached_content_name else history
         )
 
     def _ensure_proactive_day_state(self, now_dt: datetime.datetime):
@@ -1794,12 +1820,14 @@ class ChatAI:
         if self.character_id:
             last_timestamp = self.last_message_timestamp
             now_dt = datetime.datetime.now()
+            last_prefix_date = self.last_prefix_timestamp.date() if self.last_prefix_timestamp else None
             
             # 如果是第一次聊天，或者距离上次发言超过 30 分钟，或者距离上次打标超过 30 分钟（针对连续聊天），强制增加系统时间锚点
             if (not last_timestamp or 
                 (now_dt - last_timestamp).total_seconds() > 1800 or 
                 not self.last_prefix_timestamp or 
-                (now_dt - self.last_prefix_timestamp).total_seconds() > 1800):
+                (now_dt - self.last_prefix_timestamp).total_seconds() > 1800 or
+                (last_prefix_date is not None and last_prefix_date != now_dt.date())):
                 
                 weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
                 weekday_str = weekdays[now_dt.weekday()]
@@ -2138,10 +2166,12 @@ class ChatAI:
         
         # 构造落库用的时间感知前缀 (遵循 30 分钟规则，避免连发时标签堆叠)
         context_prefix = None
+        last_prefix_date = self.last_prefix_timestamp.date() if self.last_prefix_timestamp else None
         if (not self.last_message_timestamp or 
             (now_dt - self.last_message_timestamp).total_seconds() > 1800 or 
             not self.last_prefix_timestamp or 
-            (now_dt - self.last_prefix_timestamp).total_seconds() > 1800):
+            (now_dt - self.last_prefix_timestamp).total_seconds() > 1800 or
+            (last_prefix_date is not None and last_prefix_date != now_dt.date())):
             
             context_prefix = f"[系统时间感知：当前时间 {current_time_str}]"
             self.last_prefix_timestamp = now_dt
