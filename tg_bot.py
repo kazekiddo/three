@@ -147,6 +147,8 @@ class ChatAI:
         self.last_user_message_timestamp = None  # 只在用户发消息时更新，供主动发言的 30 分钟门槛使用
         self.last_prefix_timestamp = None
         self.enable_web_search = os.getenv("ENABLE_WEB_SEARCH", "true").lower() in ("1", "true", "yes", "on")
+        self.enable_prompt_cache = os.getenv("ENABLE_PROMPT_CACHE", "true").lower() in ("1", "true", "yes", "on")
+        self.prompt_cache_ttl = os.getenv("PROMPT_CACHE_TTL", "86400s")
         self.proactive_streak_count = 0
         self.proactive_streak_date = None
         self.proactive_blocked_date = None
@@ -576,11 +578,13 @@ class ChatAI:
             self.system_instruction = system_instruction + image_constraint + reminder_constraint
             config['system_instruction'] = self.system_instruction
         config['tools'] = self.tools
-
+        self.cached_content_name = None
+        if self.enable_prompt_cache:
+            self._init_prompt_cache()
         self.chat = self.client.chats.create(
             model=model,
-            config=config,
-            history=history
+            config=self._build_chat_config(),
+            history=[] if self.cached_content_name else history
         )
 
     def _build_chat_config(self):
@@ -588,16 +592,89 @@ class ChatAI:
         if self.system_instruction:
             config['system_instruction'] = self.system_instruction
         config['tools'] = self.tools
+        if self.cached_content_name:
+            config['cached_content'] = self.cached_content_name
         return config
+
+    def _log_cache_usage(self, response, context_label: str):
+        """记录缓存命中情况（若 SDK 提供 usage_metadata 字段）"""
+        try:
+            usage = getattr(response, "usage_metadata", None) or getattr(response, "usageMetadata", None)
+            if not usage:
+                return
+            # usage 可能是对象或 dict
+            def _get(obj, key):
+                return getattr(obj, key, None) if not isinstance(obj, dict) else obj.get(key)
+
+            cached_tokens = _get(usage, "cached_content_token_count")
+            cached_tokens = cached_tokens if cached_tokens is not None else _get(usage, "cachedContentTokenCount")
+            total_tokens = _get(usage, "total_token_count")
+            total_tokens = total_tokens if total_tokens is not None else _get(usage, "totalTokenCount")
+            input_tokens = _get(usage, "prompt_token_count")
+            input_tokens = input_tokens if input_tokens is not None else _get(usage, "promptTokenCount")
+            output_tokens = _get(usage, "candidates_token_count")
+            output_tokens = output_tokens if output_tokens is not None else _get(usage, "candidatesTokenCount")
+
+            if cached_tokens is None and total_tokens is None:
+                return
+
+            logger.error(
+                f"[cache] {context_label} cached_tokens={cached_tokens} "
+                f"prompt_tokens={input_tokens} output_tokens={output_tokens} total_tokens={total_tokens}"
+            )
+        except Exception:
+            pass
+
+    def _normalize_history_text(self, history):
+        items = []
+        for content in history or []:
+            role = getattr(content, 'role', None) or content.get('role')
+            parts = getattr(content, 'parts', None) or content.get('parts') or []
+            texts = []
+            for part in parts:
+                text = getattr(part, 'text', None) if not isinstance(part, dict) else part.get('text')
+                if text:
+                    texts.append(str(text))
+            items.append((role, "\n".join(texts)))
+        return items
+
+    def _is_base_history(self, history):
+        if not history:
+            return True
+        if len(history) != len(self.base_history):
+            return False
+        return self._normalize_history_text(history) == self._normalize_history_text(self.base_history)
+
+    def _init_prompt_cache(self):
+        try:
+            display_name = f"tg_bot_prefix_cache_{self.character_id or 'default'}_{self.model}"
+            config = types.CreateCachedContentConfig(
+                display_name=display_name,
+                contents=self.base_history,
+                ttl=self.prompt_cache_ttl
+            )
+            if self.system_instruction:
+                config.system_instruction = self.system_instruction
+            cache = self.client.caches.create(
+                model=self.model,
+                config=config
+            )
+            self.cached_content_name = cache.name
+        except Exception as e:
+            logger.error(f"创建提示词缓存失败: {e}")
+            self.cached_content_name = None
 
     def switch_model(self, new_model: str):
         """切换对话模型并重建 chat，会尽量保留当前对话历史。"""
         self.model = new_model
         history = getattr(self.chat, '_curated_history', None) or self.base_history
+        self.cached_content_name = None
+        if self.enable_prompt_cache:
+            self._init_prompt_cache()
         self.chat = self.client.chats.create(
             model=self.model,
             config=self._build_chat_config(),
-            history=history
+            history=[] if (self.cached_content_name and self._is_base_history(history)) else history
         )
 
     def _ensure_proactive_day_state(self, now_dt: datetime.datetime):
@@ -1584,11 +1661,13 @@ class ChatAI:
     def clear_history(self):
         """每天凌晨清空一次内存中的长对话列表，同时保留工具能力"""
         logger.info(f"正在清空角色 {self.character_id} 的短期对话感知缓冲...")
-        
+        self.cached_content_name = None
+        if self.enable_prompt_cache:
+            self._init_prompt_cache()
         self.chat = self.client.chats.create(
             model=self.model,
             config=self._build_chat_config(),
-            history=self.base_history
+            history=[] if self.cached_content_name else self.base_history
         )
     
     def send_message(self, message, image_data=None, image_mime_type=None, media_path=None):
@@ -1773,6 +1852,7 @@ class ChatAI:
 
         # 获取AI回复（automatic_function_calling 在 send_message 内部自动完成，response 是最终响应）
         response = self.chat.send_message(message_parts)
+        self._log_cache_usage(response, "send_message")
         response_text = ""
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
@@ -1907,6 +1987,7 @@ class ChatAI:
         self.pending_output_image = None
 
         response = self.chat.send_message([trigger_msg])
+        self._log_cache_usage(response, "send_proactive_message")
 
         response_text = ""
         if response.candidates and response.candidates[0].content.parts:
