@@ -557,6 +557,8 @@ class ChatAI:
         }
         self.cached_tools = None
         self.cached_prefix_history = []
+        self.cache_rotate_min_messages = 50
+        self.cache_pending_messages = 0
         self.pending_output_image = None
         
         # 创建聊天
@@ -822,6 +824,8 @@ class ChatAI:
     def _rotate_cache_before_time_anchor(self):
         if not self.enable_prompt_cache or not self.cached_tools:
             return
+        if self.cache_pending_messages < self.cache_rotate_min_messages:
+            return
         try:
             segment = self._history_to_dicts(getattr(self.chat, "_curated_history", []))
             if not segment:
@@ -847,6 +851,7 @@ class ChatAI:
                 config=self._build_chat_config(),
                 history=[]
             )
+            self.cache_pending_messages = 0
         except Exception as e:
             logger.error(f"轮换缓存失败: {e}")
 
@@ -865,6 +870,7 @@ class ChatAI:
             self._init_prompt_cache()
             if old_cache_name:
                 self._delete_cached_content(old_cache_name)
+            self.cache_pending_messages = 0
         self.chat = self.client.chats.create(
             model=self.model,
             config=self._build_chat_config(),
@@ -1858,6 +1864,7 @@ class ChatAI:
         old_cache_name = self.cached_content_name
         self.cached_content_name = None
         self.cached_prefix_history = []
+        self.cache_pending_messages = 0
         if self.enable_prompt_cache:
             self.cached_tools = self._build_cached_tools()
             self._init_prompt_cache()
@@ -1914,6 +1921,7 @@ class ChatAI:
                 media_path=media_path,
                 media_type=image_mime_type
             )
+            self.cache_pending_messages += 1
             # 用户回复后，解除“当天连续主动 5 条”限制并重置计数
             self.on_user_replied(now_dt)
         
@@ -2147,6 +2155,7 @@ class ChatAI:
                 media_path=image_path,
                 media_type='image/jpeg' if image_path else None
             )
+            self.cache_pending_messages += 1
             # 同样更新内存中的最后互动时间，确保 30 分钟判断更精准
             self.last_message_timestamp = datetime.datetime.now()
             self._update_post_reply_state(
@@ -2249,6 +2258,7 @@ class ChatAI:
                 media_path=image_path,
                 media_type='image/jpeg' if image_path else None
             )
+            self.cache_pending_messages += 1
             self.last_message_timestamp = datetime.datetime.now()
             self._update_post_reply_state(
                 trigger_message=trigger_hint,
