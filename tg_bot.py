@@ -624,6 +624,21 @@ class ChatAI:
         except Exception as e:
             logger.error(f"删除缓存失败: {e}")
 
+    def drop_cache_now(self):
+        """仅删除缓存，不重建。"""
+        old_cache_name = self.cached_content_name
+        self.cached_content_name = None
+        if old_cache_name:
+            self._delete_cached_content(old_cache_name)
+        # 重建 chat（保留已有 history，避免丢上下文）
+        history = getattr(self.chat, "_curated_history", None) or []
+        self.chat = self.client.chats.create(
+            model=self.model,
+            config=self._build_chat_config(),
+            history=history
+        )
+        return True, "缓存已删除"
+
     def _log_cache_usage(self, response, context_label: str):
         """记录缓存命中情况（若 SDK 提供 usage_metadata 字段）"""
         try:
@@ -1893,9 +1908,6 @@ class ChatAI:
         self.cached_content_name = None
         self.cached_prefix_history = []
         self.cache_pending_messages = 0
-        if self.enable_prompt_cache:
-            self.cached_tools = self._build_cached_tools()
-            self._init_prompt_cache()
         if old_cache_name:
             self._delete_cached_content(old_cache_name)
         self.chat = self.client.chats.create(
@@ -2679,6 +2691,25 @@ async def trigger_rebuild_cache(update: Update, context: ContextTypes.DEFAULT_TY
             failed += 1
     await update.message.reply_text(f"缓存重建完成：成功 {processed}，失败 {failed}")
 
+async def trigger_drop_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /drop_cache 命令：立即删除缓存"""
+    if not user_chats:
+        await update.message.reply_text("当前没有活跃聊天实例，无法删除缓存。")
+        return
+    processed = 0
+    failed = 0
+    for _, chat_ai in list(user_chats.items()):
+        try:
+            ok, msg = chat_ai.drop_cache_now()
+            if ok:
+                processed += 1
+            else:
+                failed += 1
+        except Exception as e:
+            logger.error(f"/drop_cache 失败: {e}")
+            failed += 1
+    await update.message.reply_text(f"缓存删除完成：成功 {processed}，失败 {failed}")
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /help 命令，显示所有可用命令"""
     help_text = (
@@ -2692,6 +2723,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/consolidate - 手动触发巩固核心人格任务 (后台运行)\n"
         "/care_extract [小时] - 手动触发整点关怀提取任务，默认最近 1 小时 (后台运行)\n"
         "/rebuild_cache - 立即重建缓存（后台实例全部重建）\n"
+        "/drop_cache - 立即删除缓存（后台实例全部删除）\n"
         "/help - 显示此帮助信息"
     )
     await update.message.reply_text(help_text, parse_mode='HTML')
@@ -2987,6 +3019,7 @@ def main():
     application.add_handler(CommandHandler("consolidate", trigger_consolidate))
     application.add_handler(CommandHandler("care_extract", trigger_hourly_care_extract))
     application.add_handler(CommandHandler("rebuild_cache", trigger_rebuild_cache))
+    application.add_handler(CommandHandler("drop_cache", trigger_drop_cache))
     application.add_handler(CommandHandler("help", help_command))
     # 更新过滤器，支持文字和图片（MESSAGE_TYPE.PHOTO）
     application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_message))
