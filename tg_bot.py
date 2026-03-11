@@ -551,6 +551,11 @@ class ChatAI:
                 return f"ERROR: 记下提醒时出错了: {str(e)}"
 
         self.tools = [generate_image, register_reminder]
+        self.tool_registry = {
+            "generate_image": generate_image,
+            "register_reminder": register_reminder
+        }
+        self.cached_tools = None
         self.pending_output_image = None
         
         # 创建聊天
@@ -577,6 +582,7 @@ class ChatAI:
             self.system_instruction = system_instruction + image_constraint + reminder_constraint
         self.cached_content_name = None
         if self.enable_prompt_cache:
+            self.cached_tools = self._build_cached_tools()
             self._init_prompt_cache()
         self.chat = self.client.chats.create(
             model=model,
@@ -586,10 +592,7 @@ class ChatAI:
 
     def _build_chat_config(self):
         if self.cached_content_name:
-            return {
-                'cachedContent': self.cached_content_name,
-                'automaticFunctionCalling': types.AutomaticFunctionCallingConfig()
-            }
+            return {'cachedContent': self.cached_content_name}
         config = {
             'automaticFunctionCalling': types.AutomaticFunctionCallingConfig(),
             'tools': self.tools
@@ -627,6 +630,86 @@ class ChatAI:
         except Exception:
             pass
 
+    def _build_cached_tools(self):
+        try:
+            generate_image_decl = types.FunctionDeclaration(
+                name="generate_image",
+                description="根据描述生成一张精美的图片（必须日系卡通风格）。",
+                parametersJsonSchema={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "详细的图片描述词，使用英文描述效果更佳。"
+                        }
+                    },
+                    "required": ["prompt"]
+                }
+            )
+            register_reminder_decl = types.FunctionDeclaration(
+                name="register_reminder",
+                description="将提醒任务存入记忆，要求给出明确时间与内容。",
+                parametersJsonSchema={
+                    "type": "object",
+                    "properties": {
+                        "remind_at_str": {
+                            "type": "string",
+                            "description": "提醒时间，格式 YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DD HH:MM"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "提醒内容（若有原因需包含原因→事项）"
+                        }
+                    },
+                    "required": ["remind_at_str", "content"]
+                }
+            )
+            return [types.Tool(functionDeclarations=[generate_image_decl, register_reminder_decl])]
+        except Exception as e:
+            logger.error(f"构建缓存工具声明失败: {e}")
+            return None
+
+    def _execute_tool_call(self, name: str, args):
+        func = self.tool_registry.get(name)
+        if not func:
+            return f"ERROR: 未知工具 {name}"
+        try:
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {"_raw": args}
+            if not isinstance(args, dict):
+                args = {"_raw": args}
+            return func(**args)
+        except Exception as e:
+            logger.error(f"工具执行失败: {name}, error={e}")
+            return f"ERROR: 工具执行失败: {str(e)}"
+
+    def _send_message_with_manual_tools(self, message_parts, context_label: str):
+        response = self.chat.send_message(message_parts)
+        self._log_cache_usage(response, context_label)
+        max_rounds = 3
+        for _ in range(max_rounds):
+            func_calls = getattr(response, "function_calls", None) or []
+            if not func_calls:
+                return response
+            response_parts = []
+            for call in func_calls:
+                name = getattr(call, "name", None)
+                args = getattr(call, "args", None)
+                if not name:
+                    continue
+                result = self._execute_tool_call(name, args)
+                response_parts.append(
+                    types.Part.from_function_response(name=name, response={"result": result})
+                )
+            if not response_parts:
+                return response
+            response = self.chat.send_message(response_parts)
+            self._log_cache_usage(response, f"{context_label}_tool_followup")
+        return response
+
     def _normalize_history_text(self, history):
         items = []
         for content in history or []:
@@ -650,11 +733,13 @@ class ChatAI:
     def _init_prompt_cache(self):
         try:
             display_name = f"tg_bot_prefix_cache_{self.character_id or 'default'}_{self.model}"
+            if not self.cached_tools:
+                raise ValueError("cached_tools 未就绪")
             config = types.CreateCachedContentConfig(
                 displayName=display_name,
                 contents=self.base_history,
                 ttl=self.prompt_cache_ttl,
-                tools=self.tools,
+                tools=self.cached_tools,
                 toolConfig=types.ToolConfig(
                     functionCallingConfig=types.FunctionCallingConfig(
                         mode=types.FunctionCallingConfigMode.AUTO
@@ -678,6 +763,7 @@ class ChatAI:
         history = getattr(self.chat, '_curated_history', None) or self.base_history
         self.cached_content_name = None
         if self.enable_prompt_cache:
+            self.cached_tools = self._build_cached_tools()
             self._init_prompt_cache()
         self.chat = self.client.chats.create(
             model=self.model,
@@ -1671,6 +1757,7 @@ class ChatAI:
         logger.info(f"正在清空角色 {self.character_id} 的短期对话感知缓冲...")
         self.cached_content_name = None
         if self.enable_prompt_cache:
+            self.cached_tools = self._build_cached_tools()
             self._init_prompt_cache()
         self.chat = self.client.chats.create(
             model=self.model,
@@ -1859,8 +1946,11 @@ class ChatAI:
             message_parts.append(types.Part.from_bytes(data=image_data, mime_type=image_mime_type))
 
         # 获取AI回复（automatic_function_calling 在 send_message 内部自动完成，response 是最终响应）
-        response = self.chat.send_message(message_parts)
-        self._log_cache_usage(response, "send_message")
+        if self.cached_content_name:
+            response = self._send_message_with_manual_tools(message_parts, "send_message")
+        else:
+            response = self.chat.send_message(message_parts)
+            self._log_cache_usage(response, "send_message")
         response_text = ""
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
@@ -1994,8 +2084,11 @@ class ChatAI:
 
         self.pending_output_image = None
 
-        response = self.chat.send_message([trigger_msg])
-        self._log_cache_usage(response, "send_proactive_message")
+        if self.cached_content_name:
+            response = self._send_message_with_manual_tools([trigger_msg], "send_proactive_message")
+        else:
+            response = self.chat.send_message([trigger_msg])
+            self._log_cache_usage(response, "send_proactive_message")
 
         response_text = ""
         if response.candidates and response.candidates[0].content.parts:
