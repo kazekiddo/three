@@ -614,6 +614,14 @@ class ChatAI:
             _set_field(config, types.GenerateContentConfig, "systemInstruction", "system_instruction", self.system_instruction)
         return config
 
+    def _delete_cached_content(self, name: str):
+        if not name:
+            return
+        try:
+            self.client.caches.delete(name=name)
+        except Exception as e:
+            logger.error(f"删除缓存失败: {e}")
+
     def _log_cache_usage(self, response, context_label: str):
         """记录缓存命中情况（若 SDK 提供 usage_metadata 字段）"""
         try:
@@ -822,6 +830,7 @@ class ChatAI:
             new_prefix.extend(segment)
             # 尝试创建新缓存（包含原有缓存前缀 + 本次历史）
             old_prefix = self.cached_prefix_history
+            old_cache_name = self.cached_content_name
             self.cached_prefix_history = new_prefix
             self.cached_content_name = None
             self._init_prompt_cache()
@@ -829,6 +838,9 @@ class ChatAI:
                 # 失败则回滚前缀，保留原 chat 历史
                 self.cached_prefix_history = old_prefix
                 return
+            # 新缓存成功后，删除旧缓存
+            if old_cache_name and old_cache_name != self.cached_content_name:
+                self._delete_cached_content(old_cache_name)
             # 缓存成功：重建 chat，仅保留后续新增历史
             self.chat = self.client.chats.create(
                 model=self.model,
@@ -842,6 +854,7 @@ class ChatAI:
         """切换对话模型并重建 chat，会尽量保留当前对话历史。"""
         self.model = new_model
         history = getattr(self.chat, '_curated_history', None) or self.base_history
+        old_cache_name = self.cached_content_name
         self.cached_content_name = None
         if self.enable_prompt_cache:
             self.cached_tools = self._build_cached_tools()
@@ -850,6 +863,8 @@ class ChatAI:
             if extra:
                 self.cached_prefix_history = (self.cached_prefix_history or []) + extra
             self._init_prompt_cache()
+            if old_cache_name:
+                self._delete_cached_content(old_cache_name)
         self.chat = self.client.chats.create(
             model=self.model,
             config=self._build_chat_config(),
@@ -1840,11 +1855,14 @@ class ChatAI:
     def clear_history(self):
         """每天凌晨清空一次内存中的长对话列表，同时保留工具能力"""
         logger.info(f"正在清空角色 {self.character_id} 的短期对话感知缓冲...")
+        old_cache_name = self.cached_content_name
         self.cached_content_name = None
         self.cached_prefix_history = []
         if self.enable_prompt_cache:
             self.cached_tools = self._build_cached_tools()
             self._init_prompt_cache()
+        if old_cache_name:
+            self._delete_cached_content(old_cache_name)
         self.chat = self.client.chats.create(
             model=self.model,
             config=self._build_chat_config(),
