@@ -2151,7 +2151,7 @@ class ChatAI:
             reply_candidate = payload.get("reply")
             if isinstance(reply_candidate, str):
                 user_reply_text = reply_candidate.strip()
-        if not user_reply_text and not isinstance(payload, dict):
+        if not user_reply_text:
             user_reply_text = response_text
         
         # 从 chat history 中清除系统注入块，避免 token 累积
@@ -2262,6 +2262,8 @@ class ChatAI:
         )
         if dynamic_state_prompt:
             trigger_msg += dynamic_state_prompt
+        # 统一主动消息的输出协议，便于解析 reply/state_patch
+        trigger_msg += self._build_single_call_state_patch_instruction()
 
         self.pending_output_image = None
 
@@ -2282,6 +2284,16 @@ class ChatAI:
         response_text = re.sub(r'\[SYS_PROACTIVE[^\]]*\]', '', response_text)
         response_text = re.sub(r'\[\u7cfb\u7edf\u9644\u52a0[^\]]*\]', '', response_text)
         response_text = response_text.strip()
+        
+        payload = self._extract_json_payload(response_text)
+        state_patch = payload.get("state_patch", {}) if isinstance(payload, dict) else {}
+        user_reply_text = ""
+        if isinstance(payload, dict):
+            reply_candidate = payload.get("reply")
+            if isinstance(reply_candidate, str):
+                user_reply_text = reply_candidate.strip()
+        if not user_reply_text:
+            user_reply_text = response_text
 
         # 从 chat history 中移除注入的假"用户"触发消息，保持历史干净
         # automatic_function_calling 可能在末尾追加 function_response(user) 项，
@@ -2300,6 +2312,39 @@ class ChatAI:
             pass
 
         image_path = self.pending_output_image
+
+        merged_state = current_state
+        if self.character_id and current_state:
+            try:
+                merged_state = self._merge_state_patch(current_state, state_patch)
+                self.db.upsert_dynamic_state(
+                    self.character_id,
+                    merged_state["scene_label"],
+                    merged_state["emotion_label"],
+                    merged_state["emotion_intensity"],
+                    merged_state["motivation_label"],
+                    merged_state["inhibition_label"],
+                    merged_state["hidden_expectation"],
+                    merged_state["last_user_intent"],
+                    merged_state["user_affect"],
+                    merged_state["unresolved_need"],
+                    merged_state["carryover_summary"],
+                    merged_state["reply_style"],
+                    merged_state["warmth_bias"],
+                    merged_state["initiative_bias"],
+                    merged_state["last_trigger_source"],
+                    merged_state["repair_status"]
+                )
+                self.dynamic_state = merged_state
+                self._persist_dynamic_state_snapshot(
+                    merged_state,
+                    source_kind="pre_proactive_patch_merge",
+                    trigger_message=trigger_hint,
+                    model_reply=user_reply_text,
+                    notes="single_call_state_patch_merge"
+                )
+            except Exception as e:
+                logger.error(f"合并主动消息状态补丁失败: {e}")
         
         # 构造落库用的时间感知前缀 (遵循 30 分钟规则，避免连发时标签堆叠)
         context_prefix = None
@@ -2314,9 +2359,9 @@ class ChatAI:
             self.last_prefix_timestamp = now_dt
 
         # 只落库 model 侧消息
-        if self.character_id and (response_text.strip() or image_path):
+        if self.character_id and (user_reply_text.strip() or image_path):
             self.db.save_message(
-                self.character_id, 'model', response_text,
+                self.character_id, 'model', user_reply_text,
                 model=self.model,
                 context_prefix=context_prefix,
                 media_path=image_path,
@@ -2326,13 +2371,13 @@ class ChatAI:
             self.last_message_timestamp = datetime.datetime.now()
             self._update_post_reply_state(
                 trigger_message=trigger_hint,
-                model_reply=response_text if response_text.strip() else "[AI发送了一张图片]",
-                base_state=current_state,
+                model_reply=user_reply_text if user_reply_text.strip() else "[AI发送了一张图片]",
+                base_state=merged_state,
                 turn_plan=proactive_plan,
                 proactive=True
             )
 
-        return response_text, image_path
+        return user_reply_text, image_path
 
 # 全局变量存储每个用户的聊天实例
 user_chats = {}
