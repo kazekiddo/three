@@ -1264,16 +1264,44 @@ class ChatAI:
             return self._safe_json_loads(cleaned)
         except Exception:
             pass
+        # 容错：提取文本中所有顶层 JSON 对象，优先返回第一个
+        def _extract_top_level_json_objects(s: str):
+            objects = []
+            depth = 0
+            in_str = False
+            escape = False
+            start_idx = None
+            for i, ch in enumerate(s):
+                if in_str:
+                    if escape:
+                        escape = False
+                    elif ch == "\\":
+                        escape = True
+                    elif ch == "\"":
+                        in_str = False
+                    continue
+                if ch == "\"":
+                    in_str = True
+                    continue
+                if ch == "{":
+                    if depth == 0:
+                        start_idx = i
+                    depth += 1
+                elif ch == "}":
+                    if depth > 0:
+                        depth -= 1
+                        if depth == 0 and start_idx is not None:
+                            objects.append(s[start_idx:i + 1])
+                            start_idx = None
+            return objects
 
-        # 容错：尝试从文本中提取最外层 JSON 对象
-        first = cleaned.find("{")
-        last = cleaned.rfind("}")
-        if first != -1 and last != -1 and last > first:
-            snippet = cleaned[first:last + 1]
-            try:
-                return self._safe_json_loads(snippet)
-            except Exception:
-                return {}
+        candidates = _extract_top_level_json_objects(cleaned)
+        if candidates:
+            for snippet in candidates:
+                try:
+                    return self._safe_json_loads(snippet)
+                except Exception:
+                    continue
         return {}
 
     def _merge_state_patch(self, base_state, state_patch):
@@ -2151,7 +2179,8 @@ class ChatAI:
             reply_candidate = payload.get("reply")
             if isinstance(reply_candidate, str):
                 user_reply_text = reply_candidate.strip()
-        if not user_reply_text:
+        # 仅当解析失败（payload 不是 dict）时才回退原文，避免把 JSON 透传给用户
+        if not user_reply_text and not isinstance(payload, dict):
             user_reply_text = response_text
         
         # 从 chat history 中清除系统注入块，避免 token 累积
@@ -2292,7 +2321,8 @@ class ChatAI:
             reply_candidate = payload.get("reply")
             if isinstance(reply_candidate, str):
                 user_reply_text = reply_candidate.strip()
-        if not user_reply_text:
+        # 仅当解析失败（payload 不是 dict）时才回退原文，避免把 JSON 透传给用户
+        if not user_reply_text and not isinstance(payload, dict):
             user_reply_text = response_text
 
         # 从 chat history 中移除注入的假"用户"触发消息，保持历史干净
