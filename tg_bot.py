@@ -3081,10 +3081,10 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                                 end_time = asyncio.get_event_loop().time() + dur
                                 while asyncio.get_event_loop().time() < end_time:
                                     try:
-                                await _send_with_retry(
-                                    lambda: context.bot.send_chat_action(chat_id=cid, action="typing"),
-                                    label="proactive_send_chat_action"
-                                )
+                                        await _send_with_retry(
+                                            lambda: context.bot.send_chat_action(chat_id=cid, action="typing"),
+                                            label="proactive_send_chat_action"
+                                        )
                                         await asyncio.sleep(4)
                                     except asyncio.CancelledError:
                                         break
