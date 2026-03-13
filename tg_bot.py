@@ -3062,7 +3062,11 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"proactive_check_job 整体出错: {e}")
     finally:
         # 无论本轮结果如何，动态安排下一次检查
-        _schedule_next_proactive_check(context)
+        try:
+            _schedule_next_proactive_check(context)
+            logger.error("[proactive_check] next check scheduled")
+        except Exception as e:
+            logger.error(f"[proactive_check] failed to schedule next check: {e}")
 
 
 async def post_init(application: Application):
@@ -3157,6 +3161,16 @@ def main():
     # 之后每轮由 proactive_check_job 自身动态安排下次，间隔同样随机 10~25 分钟，保证无规律感
     import random
     job_queue.run_once(proactive_check_job, when=random.randint(600, 1500))
+    logger.error("[proactive_check] initial check scheduled")
+
+    # JobQueue 心跳：每 10 分钟确认调度器仍在运行
+    async def jobqueue_heartbeat(context: ContextTypes.DEFAULT_TYPE):
+        now_dt = datetime.datetime.now()
+        logger.error(
+            f"[jobqueue_heartbeat] {now_dt.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"user_chats={len(user_chats)}"
+        )
+    job_queue.run_repeating(jobqueue_heartbeat, interval=600, first=60)
 
     # 已关闭“每小时整点自动提取关怀事项”定时任务。
     # 如需执行，可使用 /care_extract 手动触发。
