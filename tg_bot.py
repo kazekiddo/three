@@ -2440,6 +2440,8 @@ class ChatAI:
 # 全局变量存储每个用户的聊天实例
 user_chats = {}
 user_model_prefs = {}
+dice_sessions = {}
+DICE_SESSION_TTL_SECONDS = 120
 ALLOWED_USER_ID = 569020802
 
 async def check_permission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -2546,6 +2548,7 @@ async def use_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户消息"""
     import asyncio
+    now_ts = time.time()
     
     async def keep_typing(chat_id, duration):
         """持续发送 typing 状态"""
@@ -2594,55 +2597,110 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("请先使用 /start 和 /select 选择角色")
         return
 
-    # 扔骰子：仅支持“扔骰子，我先 / 你先”两种指令
-    if "扔骰子" in user_message and ("我先" in user_message or "你先" in user_message):
-        chat_ai = user_chats[user_id]
-        order = "user_first" if "我先" in user_message else "ai_first"
+    # 清理过期骰子会话
+    stale_ids = [
+        uid for uid, sess in dice_sessions.items()
+        if isinstance(sess, dict) and sess.get("created_at") and now_ts - sess["created_at"] > DICE_SESSION_TTL_SECONDS
+    ]
+    for uid in stale_ids:
+        dice_sessions.pop(uid, None)
 
-        async def send_ai_reply(text: str):
-            messages = text.split('\n')
-            char_delay = 60.0 / 240
-            for msg in messages:
-                if msg.strip():
-                    delay = len(msg.strip()) * char_delay
-                    typing_task = asyncio.create_task(keep_typing(update.effective_chat.id, delay))
-                    await asyncio.sleep(delay)
-                    typing_task.cancel()
-                    await _send_with_retry(
-                        lambda: update.message.reply_text(msg.strip()),
-                        label="reply_text"
-                    )
+    chat_ai = user_chats[user_id]
 
-        if order == "user_first":
-            msg_user = await _send_with_retry(
-                lambda: context.bot.send_dice(chat_id=update.effective_chat.id),
-                label="send_dice_user"
-            )
-            if not msg_user or not getattr(msg_user, "dice", None):
-                await update.message.reply_text("掷骰子失败了，稍后再试。")
-                return
-            user_val = msg_user.dice.value
+    def save_user_message_to_db(text: str):
+        if not chat_ai.character_id:
+            return
+        now_dt = datetime.datetime.now()
+        context_prefix = None
+        last_prefix_date = chat_ai.last_prefix_timestamp.date() if chat_ai.last_prefix_timestamp else None
+        if (
+            not chat_ai.last_message_timestamp
+            or (now_dt - chat_ai.last_message_timestamp).total_seconds() > 1800
+            or not chat_ai.last_prefix_timestamp
+            or (now_dt - chat_ai.last_prefix_timestamp).total_seconds() > 1800
+            or (last_prefix_date is not None and last_prefix_date != now_dt.date())
+        ):
+            weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+            weekday_str = weekdays[now_dt.weekday()]
+            current_time_str = now_dt.strftime(f"%Y年%m月%d日 {weekday_str} %H:%M:%S")
+            context_prefix = f"[系统时间感知：当前时间 {current_time_str}]"
+            chat_ai.last_prefix_timestamp = now_dt
+            if chat_ai.cached_content_name:
+                chat_ai._rotate_cache_before_time_anchor()
+        chat_ai.db.save_message(
+            chat_ai.character_id,
+            'user',
+            text,
+            model=chat_ai.model,
+            context_prefix=context_prefix
+        )
+        chat_ai.cache_pending_messages += 1
+        chat_ai.last_message_timestamp = now_dt
+        chat_ai.last_user_message_timestamp = now_dt
+        chat_ai.on_user_replied(now_dt)
 
-            prompt1 = f"[系统骰子结果] 对方刚刚掷出点数={user_val}。请用一句话自然评论这次结果。"
-            reply1, _ = chat_ai.send_message(prompt1, save_user_message=False)
-            if reply1.strip():
-                await send_ai_reply(reply1)
+    async def send_ai_reply(text: str):
+        messages = text.split('\n')
+        char_delay = 60.0 / 240
+        for msg in messages:
+            if msg.strip():
+                delay = len(msg.strip()) * char_delay
+                typing_task = asyncio.create_task(keep_typing(update.effective_chat.id, delay))
+                await asyncio.sleep(delay)
+                typing_task.cancel()
+                await _send_with_retry(
+                    lambda: update.message.reply_text(msg.strip()),
+                    label="reply_text"
+                )
 
-            msg_ai = await _send_with_retry(
-                lambda: context.bot.send_dice(chat_id=update.effective_chat.id),
-                label="send_dice_ai"
-            )
-            if not msg_ai or not getattr(msg_ai, "dice", None):
-                await update.message.reply_text("掷骰子失败了，稍后再试。")
-                return
-            ai_val = msg_ai.dice.value
+    # 用户发送骰子（🎲）直接触发：用户先扔
+    if update.message.dice:
+        user_val = update.message.dice.value
 
-            prompt2 = f"[系统骰子结果] 对方={user_val}，你={ai_val}。请用一句话宣布胜负。"
+        session = dice_sessions.get(user_id) or {}
+        ai_val = session.get("ai_val")
+        if ai_val is not None:
+            # AI 已经扔过（你先），这是第二次：直接宣布胜负
+            prompt2 = f"[系统骰子结果] 你={ai_val}，对方={user_val}。请用一句话宣布胜负。"
             reply2, _ = chat_ai.send_message(prompt2, save_user_message=False)
             if reply2.strip():
                 await send_ai_reply(reply2)
+            dice_sessions.pop(user_id, None)
             return
 
+        # 用户先扔：先评论，再让 AI 扔并宣布胜负
+        prompt1 = f"[系统骰子结果] 对方刚刚掷出点数={user_val}。请用一句话自然评论这次结果。"
+        reply1, _ = chat_ai.send_message(prompt1, save_user_message=False)
+        if reply1.strip():
+            await send_ai_reply(reply1)
+
+        msg_ai = await _send_with_retry(
+            lambda: context.bot.send_dice(chat_id=update.effective_chat.id),
+            label="send_dice_ai"
+        )
+        if not msg_ai or not getattr(msg_ai, "dice", None):
+            await update.message.reply_text("掷骰子失败了，稍后再试。")
+            return
+        ai_val = msg_ai.dice.value
+
+        prompt2 = f"[系统骰子结果] 对方={user_val}，你={ai_val}。请用一句话宣布胜负。"
+        reply2, _ = chat_ai.send_message(prompt2, save_user_message=False)
+        if reply2.strip():
+            await send_ai_reply(reply2)
+        dice_sessions.pop(user_id, None)
+        return
+
+    # 文字指令：仅支持“扔骰子，你先 / 我先”
+    if "扔骰子" in user_message and ("我先" in user_message or "你先" in user_message):
+        save_user_message_to_db(user_message)
+        order = "user_first" if "我先" in user_message else "ai_first"
+
+        if order == "user_first":
+            # 等待用户发送 🎲，不提示
+            dice_sessions[user_id] = {"ai_val": None, "created_at": now_ts}
+            return
+
+        # AI 先扔：先评论，等待用户发送 🎲
         msg_ai = await _send_with_retry(
             lambda: context.bot.send_dice(chat_id=update.effective_chat.id),
             label="send_dice_ai"
@@ -2657,24 +2715,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if reply1.strip():
             await send_ai_reply(reply1)
 
-        msg_user = await _send_with_retry(
-            lambda: context.bot.send_dice(chat_id=update.effective_chat.id),
-            label="send_dice_user"
-        )
-        if not msg_user or not getattr(msg_user, "dice", None):
-            await update.message.reply_text("掷骰子失败了，稍后再试。")
-            return
-        user_val = msg_user.dice.value
-
-        prompt2 = f"[系统骰子结果] 你={ai_val}，对方={user_val}。请用一句话宣布胜负。"
-        reply2, _ = chat_ai.send_message(prompt2, save_user_message=False)
-        if reply2.strip():
-            await send_ai_reply(reply2)
+        dice_sessions[user_id] = {"ai_val": ai_val, "created_at": now_ts}
         return
     
     try:
         # 获取AI回复
-        chat_ai = user_chats[user_id]
         response, ai_image_path = chat_ai.send_message(
             user_message, 
             image_data=image_data, 
