@@ -5,6 +5,8 @@ import json
 import random
 from dotenv import load_dotenv
 from telegram import Update
+from telegram.request import HTTPXRequest
+from telegram.error import TimedOut, NetworkError
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google import genai
 from google.genai import types
@@ -23,6 +25,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+async def _send_with_retry(coro_factory, label: str, retries: int = 2, base_delay: float = 0.7):
+    """对 Telegram 发送请求做轻量重试，避免偶发网络超时导致整轮失败。"""
+    import asyncio
+    for attempt in range(retries + 1):
+        try:
+            return await coro_factory()
+        except (TimedOut, NetworkError) as e:
+            if attempt >= retries:
+                raise
+            delay = base_delay * (2 ** attempt)
+            logger.error(f"{label} timeout, retry in {delay:.1f}s (attempt {attempt+1}/{retries})")
+            await asyncio.sleep(delay)
 
 # 确保媒体目录存在
 MEDIA_DIR = os.path.join(os.getcwd(), 'media', 'photos')
@@ -138,7 +153,20 @@ class ChatAI:
         if not api_key:
             raise ValueError("请设置 GOOGLE_API_KEY 或 GEMINI_API_KEY 环境变量")
         
-        self.client = genai.Client(api_key=api_key)
+        # Gemini 请求超时与重试（避免长输出或网络抖动导致 Timed out）
+        timeout_ms = 120000
+        retry_attempts = 3
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                timeout=timeout_ms,
+                retry_options=types.HttpRetryOptions(
+                    attempts=retry_attempts,
+                    initial_delay=1.0,
+                    max_delay=10.0
+                )
+            )
+        )
         self.model = model
         self.character_id = character_id
         self.system_instruction = system_instruction
@@ -2528,6 +2556,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(4)  # 每4秒刷新一次
             except asyncio.CancelledError:
                 break
+            except Exception:
+                # typing 状态失败不影响主流程
+                break
     
     user_id = update.effective_user.id
     user_message = update.message.text or update.message.caption or ""
@@ -2575,9 +2606,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 如果 AI 生成了图片，先发送图片
         if ai_image_path and os.path.exists(ai_image_path):
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id, 
-                photo=open(ai_image_path, 'rb')
+            await _send_with_retry(
+                lambda: context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=open(ai_image_path, 'rb')
+                ),
+                label="send_photo"
             )
         
         # 按换行符拆分消息
@@ -2597,7 +2631,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(delay)
                 typing_task.cancel()
                 
-                await update.message.reply_text(msg.strip())
+                await _send_with_retry(
+                    lambda: update.message.reply_text(msg.strip()),
+                    label="reply_text"
+                )
     except Exception as e:
         logger.error(f"处理消息出错: {e}")
         await update.message.reply_text(f"错误：{str(e)}")
@@ -3026,7 +3063,10 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                 # 发送图片（如有）
                 sent_any = False
                 if image_path and os.path.exists(image_path):
-                    await context.bot.send_photo(chat_id=user_id, photo=open(image_path, 'rb'))
+                    await _send_with_retry(
+                        lambda: context.bot.send_photo(chat_id=user_id, photo=open(image_path, 'rb')),
+                        label="proactive_send_photo"
+                    )
                     sent_any = True
 
                 # 分段发送文字，模拟真实打字速度（120 字/分钟），与 handle_message 保持一致
@@ -3041,7 +3081,10 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                                 end_time = asyncio.get_event_loop().time() + dur
                                 while asyncio.get_event_loop().time() < end_time:
                                     try:
-                                        await context.bot.send_chat_action(chat_id=cid, action="typing")
+                                await _send_with_retry(
+                                    lambda: context.bot.send_chat_action(chat_id=cid, action="typing"),
+                                    label="proactive_send_chat_action"
+                                )
                                         await asyncio.sleep(4)
                                     except asyncio.CancelledError:
                                         break
@@ -3049,7 +3092,10 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                             typing_task = asyncio.create_task(keep_typing(user_id, delay))
                             await asyncio.sleep(delay)
                             typing_task.cancel()
-                            await context.bot.send_message(chat_id=user_id, text=line.strip())
+                            await _send_with_retry(
+                                lambda: context.bot.send_message(chat_id=user_id, text=line.strip()),
+                                label="proactive_send_message"
+                            )
                             sent_any = True
 
                 if sent_any:
@@ -3096,13 +3142,16 @@ def main():
         return
     
     # 创建应用，增加超时时间
+    request = HTTPXRequest(
+        connect_timeout=20.0,
+        read_timeout=90.0,
+        write_timeout=90.0,
+        pool_timeout=20.0,
+    )
     application = (
         Application.builder()
         .token(token)
-        .connect_timeout(30.0)
-        .read_timeout(30.0)
-        .write_timeout(30.0)
-        .pool_timeout(30.0)
+        .request(request)
         .post_init(post_init)
         .build()
     )
