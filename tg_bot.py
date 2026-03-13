@@ -1995,7 +1995,7 @@ class ChatAI:
             history=[] if self.cached_content_name else self.base_history
         )
     
-    def send_message(self, message, image_data=None, image_mime_type=None, media_path=None):
+    def send_message(self, message, image_data=None, image_mime_type=None, media_path=None, save_user_message=True):
         """发送消息并获取回复"""
         context_prefix = None
         proactive_image_forced = False
@@ -2005,7 +2005,7 @@ class ChatAI:
         pre_rule_notes = []
         
         # 处理时间连续性感知架构 (判断与上一条用户消息的时间差)
-        if self.character_id:
+        if self.character_id and save_user_message:
             last_timestamp = self.last_message_timestamp
             now_dt = datetime.datetime.now()
             last_prefix_date = self.last_prefix_timestamp.date() if self.last_prefix_timestamp else None
@@ -2032,7 +2032,7 @@ class ChatAI:
             self.last_user_message_timestamp = now_dt  # 只有用户说话才更新这个
         
         # 保存用户消息，同步落库纯净和前置标签（如果有）
-        if self.character_id:
+        if self.character_id and save_user_message:
             self.db.save_message(
                 self.character_id, 'user', message, 
                 model=self.model, 
@@ -2588,10 +2588,88 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not user_message:
             user_message = "[用户发送了一张图片]"
-    
+
     # 检查用户是否已选择角色
     if user_id not in user_chats:
         await update.message.reply_text("请先使用 /start 和 /select 选择角色")
+        return
+
+    # 扔骰子：仅支持“扔骰子，我先 / 你先”两种指令
+    if "扔骰子" in user_message and ("我先" in user_message or "你先" in user_message):
+        chat_ai = user_chats[user_id]
+        order = "user_first" if "我先" in user_message else "ai_first"
+
+        async def send_ai_reply(text: str):
+            messages = text.split('\n')
+            char_delay = 60.0 / 240
+            for msg in messages:
+                if msg.strip():
+                    delay = len(msg.strip()) * char_delay
+                    typing_task = asyncio.create_task(keep_typing(update.effective_chat.id, delay))
+                    await asyncio.sleep(delay)
+                    typing_task.cancel()
+                    await _send_with_retry(
+                        lambda: update.message.reply_text(msg.strip()),
+                        label="reply_text"
+                    )
+
+        if order == "user_first":
+            msg_user = await _send_with_retry(
+                lambda: context.bot.send_dice(chat_id=update.effective_chat.id),
+                label="send_dice_user"
+            )
+            if not msg_user or not getattr(msg_user, "dice", None):
+                await update.message.reply_text("掷骰子失败了，稍后再试。")
+                return
+            user_val = msg_user.dice.value
+
+            prompt1 = f"[系统骰子结果] 对方刚刚掷出点数={user_val}。请用一句话自然评论这次结果。"
+            reply1, _ = chat_ai.send_message(prompt1, save_user_message=False)
+            if reply1.strip():
+                await send_ai_reply(reply1)
+
+            msg_ai = await _send_with_retry(
+                lambda: context.bot.send_dice(chat_id=update.effective_chat.id),
+                label="send_dice_ai"
+            )
+            if not msg_ai or not getattr(msg_ai, "dice", None):
+                await update.message.reply_text("掷骰子失败了，稍后再试。")
+                return
+            ai_val = msg_ai.dice.value
+
+            prompt2 = f"[系统骰子结果] 对方={user_val}，你={ai_val}。请用一句话宣布胜负。"
+            reply2, _ = chat_ai.send_message(prompt2, save_user_message=False)
+            if reply2.strip():
+                await send_ai_reply(reply2)
+            return
+
+        msg_ai = await _send_with_retry(
+            lambda: context.bot.send_dice(chat_id=update.effective_chat.id),
+            label="send_dice_ai"
+        )
+        if not msg_ai or not getattr(msg_ai, "dice", None):
+            await update.message.reply_text("掷骰子失败了，稍后再试。")
+            return
+        ai_val = msg_ai.dice.value
+
+        prompt1 = f"[系统骰子结果] 你刚刚掷出点数={ai_val}。请用一句话自然评论这次结果。"
+        reply1, _ = chat_ai.send_message(prompt1, save_user_message=False)
+        if reply1.strip():
+            await send_ai_reply(reply1)
+
+        msg_user = await _send_with_retry(
+            lambda: context.bot.send_dice(chat_id=update.effective_chat.id),
+            label="send_dice_user"
+        )
+        if not msg_user or not getattr(msg_user, "dice", None):
+            await update.message.reply_text("掷骰子失败了，稍后再试。")
+            return
+        user_val = msg_user.dice.value
+
+        prompt2 = f"[系统骰子结果] 你={ai_val}，对方={user_val}。请用一句话宣布胜负。"
+        reply2, _ = chat_ai.send_message(prompt2, save_user_message=False)
+        if reply2.strip():
+            await send_ai_reply(reply2)
         return
     
     try:
