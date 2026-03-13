@@ -3295,8 +3295,8 @@ def main():
     application.add_handler(CommandHandler("rebuild_cache", trigger_rebuild_cache))
     application.add_handler(CommandHandler("drop_cache", trigger_drop_cache))
     application.add_handler(CommandHandler("help", help_command))
-    # 更新过滤器，支持文字和图片（MESSAGE_TYPE.PHOTO）
-    application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_message))
+    # 更新过滤器，支持文字、图片与骰子
+    application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.DICE) & ~filters.COMMAND, handle_message))
     
     # 启动后台记忆任务
     async def memory_filter_job(context: ContextTypes.DEFAULT_TYPE):
