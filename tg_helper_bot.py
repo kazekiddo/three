@@ -24,7 +24,7 @@ USER_PHOTO_PATH = "/data/three/media/photos/photo_siyuan.jpg"
 ALLOWED_USER_ID = 569020802
 
 # 存储用户的生图会话状态
-# { user_id: { 'chat': genai.Chat, 'mode': str } }
+# { user_id: { 'ai': HelperAI, 'last_image': bytes | None } }
 user_sessions = {}
 
 class HelperAI:
@@ -79,13 +79,18 @@ class HelperAI:
             history=history
         )
 
-    async def generate(self, prompt):
+    async def generate(self, prompt, image_bytes=None):
         """调用 Gemini 生成图片并处理"""
         # 强制要求日系卡通风格
         full_prompt = f"{prompt}. STYLE REQUIREMENT: Strictly follow Japanese anime / cartoon style."
-        
-        # 按照 SDK 要求，直接发送单个 Part 的列表或单独的内容对象
-        response = self.chat.send_message(types.Part.from_text(text=full_prompt))
+
+        # 按照 SDK 要求，发送 Part 列表（可选图片 + 文本）
+        parts = []
+        if image_bytes:
+            parts.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
+        parts.append(types.Part.from_text(text=full_prompt))
+
+        response = self.chat.send_message(parts)
         
         for part in response.parts:
             if part.inline_data is not None:
@@ -130,7 +135,10 @@ async def start_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         instruction += "Maintain consistency for both Nanase and Siyuan based on references."
 
     try:
-        user_sessions[user_id] = HelperAI(cmd, instruction)
+        user_sessions[user_id] = {
+            'ai': HelperAI(cmd, instruction),
+            'last_image': None
+        }
         await update.message.reply_text(f"模式已启动: {cmd}\n请发送你的图片描述，你可以不断反馈修改。输入 /end 结束。")
     except Exception as e:
         await update.message.reply_text(f"启动失败: {str(e)}")
@@ -154,9 +162,42 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/end — 结束当前生图会话\n"
         "/help — 显示此帮助信息\n\n"
         "💡 启动任意生图模式后，直接发送文字描述即可生成图片，"
-        "可持续对话修改，完成后使用 /end 结束。"
+        "也可先发送一张图片作为参考，再发送描述。可持续对话修改，完成后使用 /end 结束。"
     )
     await update.message.reply_text(help_text, parse_mode='HTML')
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_auth(update): return
+    user_id = update.effective_user.id
+
+    if user_id not in user_sessions:
+        await update.message.reply_text("请先使用 /gen, /gen_me, /gen_user 或 /gen_both 开始生图。")
+        return
+
+    # 取最大尺寸的照片
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    photo_bytes = await file.download_as_bytearray()
+
+    user_sessions[user_id]['last_image'] = bytes(photo_bytes)
+
+    caption = update.message.caption
+    if caption:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+        try:
+            ai_session = user_sessions[user_id]['ai']
+            photo_bio, text = await ai_session.generate(caption, image_bytes=bytes(photo_bytes))
+            if photo_bio:
+                await update.message.reply_photo(photo=photo_bio)
+            if text:
+                await update.message.reply_text(text)
+            elif not photo_bio:
+                await update.message.reply_text("未能生成图片，请换个描述试试。")
+        except Exception as e:
+            logger.error(f"生图出错: {e}")
+            await update.message.reply_text(f"出错啦: {str(e)}")
+    else:
+        await update.message.reply_text("已收到图片。请发送文字描述以生成新图。")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update): return
@@ -170,8 +211,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
     
     try:
-        ai_session = user_sessions[user_id]
-        photo_bio, text = await ai_session.generate(prompt)
+        ai_session = user_sessions[user_id]['ai']
+        image_bytes = user_sessions[user_id].get('last_image')
+        photo_bio, text = await ai_session.generate(prompt, image_bytes=image_bytes)
         
         if photo_bio:
             await update.message.reply_photo(photo=photo_bio)
@@ -201,6 +243,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     print("Helper Bot 已启动")
     application.run_polling()
