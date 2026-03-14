@@ -3121,24 +3121,33 @@ async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
     finally:
         db.close()
 
+next_proactive_check_time = None
 
-def _schedule_next_proactive_check(context):
+def _schedule_next_proactive_check():
     """安排下一次主动意愿检查，间隔随机 600~1500 秒（10~25 分钟），保证无规律感。"""
+    global next_proactive_check_time
     import random
+    import datetime
     next_interval = random.randint(600, 1500)
-    context.application.job_queue.run_once(proactive_check_job, when=next_interval)
+    next_proactive_check_time = datetime.datetime.now() + datetime.timedelta(seconds=next_interval)
 
 
 async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
     """AI 自主意愿检查：evaluate → generate → send，完成后动态安排下一次检查。
+    - 使用 run_repeating 稳健调度，根据 next_proactive_check_time 触发
     - 夜间（北京时间 0:00~8:00）静默，不发消息
     - 沉默不足 30 分钟不打扰
     - AI 自己决定要不要发，内容也是 AI 自己生成
     - 打字延迟模拟与普通消息一致
     """
+    global next_proactive_check_time
     import asyncio
+    
+    now_dt = datetime.datetime.now()
+    if next_proactive_check_time and now_dt < next_proactive_check_time:
+        return
+
     try:
-        now_dt = datetime.datetime.now()
         logger.error(
             f"[proactive_check] tick at {now_dt.strftime('%Y-%m-%d %H:%M:%S')} "
             f"user_chats={len(user_chats)}"
@@ -3235,7 +3244,7 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
     finally:
         # 无论本轮结果如何，动态安排下一次检查
         try:
-            _schedule_next_proactive_check(context)
+            _schedule_next_proactive_check()
             logger.error("[proactive_check] next check scheduled")
         except Exception as e:
             logger.error(f"[proactive_check] failed to schedule next check: {e}")
@@ -3334,10 +3343,9 @@ def main():
 
     # AI 主动发消息：首次检查在启动后随机 10~25 分钟触发
     # 之后每轮由 proactive_check_job 自身动态安排下次，间隔同样随机 10~25 分钟，保证无规律感
-    import random
-    job_queue.run_once(proactive_check_job, when=random.randint(600, 1500))
+    _schedule_next_proactive_check()
     logger.error("[proactive_check] initial check scheduled")
-
+    job_queue.run_repeating(proactive_check_job, interval=60, first=30)
     # JobQueue 心跳：每 10 分钟确认调度器仍在运行
     async def jobqueue_heartbeat(context: ContextTypes.DEFAULT_TYPE):
         now_dt = datetime.datetime.now()
