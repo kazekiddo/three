@@ -993,6 +993,25 @@ class ChatAI:
         if self.proactive_streak_count >= 5:
             self.proactive_blocked_date = now_dt.date()
 
+    def _should_add_wakeup_prompt(self) -> bool:
+        """北京时间 4:00-12:00 之间，且用户自 4:00 起未发言时，加入叫起床提示。"""
+        tz_bj = datetime.timezone(datetime.timedelta(hours=8))
+        now_bj = datetime.datetime.now(tz_bj)
+        start_time = now_bj.replace(hour=4, minute=0, second=0, microsecond=0)
+        noon_time = now_bj.replace(hour=12, minute=0, second=0, microsecond=0)
+        if not (start_time <= now_bj < noon_time):
+            return False
+
+        last_user_ts = self.last_user_message_timestamp
+        if not last_user_ts:
+            return True
+
+        if last_user_ts.tzinfo is None:
+            last_user_ts = last_user_ts.replace(tzinfo=tz_bj)
+        else:
+            last_user_ts = last_user_ts.astimezone(tz_bj)
+        return last_user_ts < start_time
+
     def _should_use_web_search(self, message: str) -> bool:
         """严格模式：仅在用户明确说“上网”时触发联网搜索"""
         if not self.enable_web_search or not message:
@@ -2317,6 +2336,11 @@ class ChatAI:
             "内容简短自然，符合你的性格，不要提及这是系统触发或你在'自言自语'。"
             "直接输出你想说的话即可。"
         )
+        if self._should_add_wakeup_prompt():
+            trigger_msg += (
+                "\n[系统补充]\n"
+                "现在是上午，请你以角色身份叫他起床，"
+            )
         if dynamic_state_prompt:
             trigger_msg += dynamic_state_prompt
         # 统一主动消息的输出协议，便于解析 reply/state_patch
