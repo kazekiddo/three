@@ -2634,9 +2634,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_ai = user_chats[user_id]
 
-    def save_user_message_to_db(text: str):
+    def save_user_message_to_db(text: str, media_path: str = None, media_type: str = None):
         if not chat_ai.character_id:
-            return
+            return None
         now_dt = datetime.datetime.now()
         context_prefix = None
         last_prefix_date = chat_ai.last_prefix_timestamp.date() if chat_ai.last_prefix_timestamp else None
@@ -2659,12 +2659,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'user',
             text,
             model=chat_ai.model,
-            context_prefix=context_prefix
+            context_prefix=context_prefix,
+            media_path=media_path,
+            media_type=media_type
         )
         chat_ai.cache_pending_messages += 1
         chat_ai.last_message_timestamp = now_dt
         chat_ai.last_user_message_timestamp = now_dt
         chat_ai.on_user_replied(now_dt)
+        return context_prefix
+
+    def append_user_message_to_history(text: str):
+        try:
+            history = getattr(chat_ai.chat, "_curated_history", None)
+            if history is None:
+                return
+            history.append({
+                "role": "user",
+                "parts": [{"text": text}]
+            })
+        except Exception:
+            pass
 
     async def send_ai_reply(text: str):
         messages = text.split('\n')
@@ -2679,6 +2694,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     lambda: update.message.reply_text(msg.strip()),
                     label="reply_text"
                 )
+
+    # 命中“别回”：只落库与历史，不请求 Gemini
+    if "别回" in user_message:
+        context_prefix = save_user_message_to_db(
+            user_message,
+            media_path=media_path,
+            media_type=image_mime_type
+        )
+        history_text = f"{context_prefix}\n{user_message}" if context_prefix else user_message
+        append_user_message_to_history(history_text)
+        return
 
     # 用户发送骰子（🎲）直接触发：用户先扔
     if update.message.dice:
