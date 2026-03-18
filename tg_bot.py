@@ -2696,7 +2696,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
     # 命中“别回”：只落库与历史，不请求 Gemini
-    if "别回" in user_message:
+    _no_reply_keywords = ["别回", "不准回", "不要回", "不许回", "不用回", "别再回"]
+    if any(k in user_message for k in _no_reply_keywords):
         context_prefix = save_user_message_to_db(
             user_message,
             media_path=media_path,
