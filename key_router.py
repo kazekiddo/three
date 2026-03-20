@@ -10,7 +10,8 @@ from google.genai.errors import APIError
 logger = logging.getLogger(__name__)
 
 class KeyRouter:
-    def __init__(self, env_vars, default_env_vars=None):
+    def __init__(self, name, env_vars, default_env_vars=None):
+        self.name = name
         def extract_keys(var_names):
             extracted = []
             for v in var_names:
@@ -43,7 +44,7 @@ class KeyRouter:
     def rotate(self):
         if self.keys:
             self.idx = (self.idx + 1) % len(self.keys)
-            logger.error(f"Rotated API key to index {self.idx}")
+            logger.error(f"[{self.name} Router] Rotated API key to index {self.idx}")
 
     def get_client(self, **kwargs):
         key = self.get_key()
@@ -67,14 +68,14 @@ class KeyRouter:
             client = self.get_client(**get_client_kwargs)
             key_str = self.get_key() or "unknown"
             masked_key = key_str[:12] + "..." + key_str[-4:] if len(key_str) > 16 else key_str
-            logger.error(f"[KeyRouter] 正在调用 Gemini API，当前使用的 Key (游标 {self.idx}): {masked_key}")
+            logger.error(f"[{self.name} Router] 正在调用 Gemini API，当前使用的 Key (游标 {self.idx}): {masked_key}")
             
             try:
                 res = action_fn(client)
-                logger.error(f"[KeyRouter] 调用成功 (游标 {self.idx}): {masked_key}")
+                logger.error(f"[{self.name} Router] 调用成功 (游标 {self.idx}): {masked_key}")
                 return res
             except Exception as e:
-                logger.error(f"[KeyRouter] 调用报错 (游标 {self.idx}): {masked_key} - 报错信息: {e}")
+                logger.error(f"[{self.name} Router] 调用报错 (游标 {self.idx}): {masked_key} - 报错信息: {e}")
                 # APIError in google.genai has .code
                 is_quota_or_auth = False
                 if isinstance(e, APIError):
@@ -96,6 +97,6 @@ class KeyRouter:
                     raise e
         raise Exception("All API keys failed.")
 
-chat_router = KeyRouter(['GOOGLE_API_KEY', 'GEMINI_API_KEY'])
-embed_router = KeyRouter(['GEMINI_API_KEY_EMBED'], default_env_vars=['GOOGLE_API_KEY', 'GEMINI_API_KEY'])
-image_router = KeyRouter(['GEMINI_API_KEY_IMAGE'], default_env_vars=['GOOGLE_API_KEY', 'GEMINI_API_KEY'])
+chat_router = KeyRouter('Chat', ['GOOGLE_API_KEY', 'GEMINI_API_KEY'])
+embed_router = KeyRouter('Embed', ['GEMINI_API_KEY_EMBED'], default_env_vars=['GOOGLE_API_KEY', 'GEMINI_API_KEY'])
+image_router = KeyRouter('Image', ['GEMINI_API_KEY_IMAGE'], default_env_vars=['GOOGLE_API_KEY', 'GEMINI_API_KEY'])
