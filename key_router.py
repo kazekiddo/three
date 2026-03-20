@@ -65,9 +65,16 @@ class KeyRouter:
         
         while attempts < max_attempts:
             client = self.get_client(**get_client_kwargs)
+            key_str = self.get_key() or "unknown"
+            masked_key = key_str[:12] + "..." + key_str[-4:] if len(key_str) > 16 else key_str
+            logger.error(f"[KeyRouter] 正在调用 Gemini API，当前使用的 Key (游标 {self.idx}): {masked_key}")
+            
             try:
-                return action_fn(client)
+                res = action_fn(client)
+                logger.error(f"[KeyRouter] 调用成功 (游标 {self.idx}): {masked_key}")
+                return res
             except Exception as e:
+                logger.error(f"[KeyRouter] 调用报错 (游标 {self.idx}): {masked_key} - 报错信息: {e}")
                 # APIError in google.genai has .code
                 is_quota_or_auth = False
                 if isinstance(e, APIError):
