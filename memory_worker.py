@@ -6,6 +6,8 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from google import genai
+from key_router import chat_router, embed_router
+from google.genai.errors import APIError
 from pydantic import BaseModel
 from database import Database
 
@@ -35,9 +37,8 @@ class MemoryWorker:
     }
 
     def __init__(self, api_key=None):
-        if api_key is None:
-            api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')
-        self.client = genai.Client(api_key=api_key)
+        self.client = chat_router.get_client()
+        self.client_embed = embed_router.get_client()
         self.db = Database()
 
     @staticmethod
@@ -304,11 +305,14 @@ class MemoryWorker:
                     )
 
                     try:
-                        response = self.client.models.generate_content(
-                            model='gemini-2.5-flash',
-                            contents=prompt,
-                            config={'response_mime_type': 'application/json'}
-                        )
+                        def _do_filter(cli):
+                            return cli.models.generate_content(
+                                model='gemini-3-flash-preview',
+                                contents=prompt,
+                                config={'response_mime_type': 'application/json'}
+                            )
+                        def _on_rot_chat(cli): self.client = cli
+                        response = chat_router.execute_with_retry(_do_filter, on_rotate=_on_rot_chat)
                         
                         if response.text:
                             json_text = self._extract_json_text(response.text)
@@ -318,10 +322,13 @@ class MemoryWorker:
                             # 1. 保存情景记忆
                             for mem in memories:
                                 try:
-                                    embed_res = self.client.models.embed_content(
-                                        model='gemini-embedding-001',
-                                        contents=mem["content"]
-                                    )
+                                    def _do_embed1(cli):
+                                        return cli.models.embed_content(
+                                            model='gemini-embedding-001',
+                                            contents=mem["content"]
+                                        )
+                                    def _on_rot_embed1(cli): self.client_embed = cli
+                                    embed_res = embed_router.execute_with_retry(_do_embed1, on_rotate=_on_rot_embed1)
                                     embedding = embed_res.embeddings[0].values
                                 except Exception:
                                     embedding = None
@@ -403,11 +410,14 @@ class MemoryWorker:
                 )
 
                 try:
-                    response = self.client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=prompt,
-                        config={'response_mime_type': 'application/json'}
-                    )
+                    def _do_cons(cli):
+                        return cli.models.generate_content(
+                            model='gemini-3-flash-preview',
+                            contents=prompt,
+                            config={'response_mime_type': 'application/json'}
+                        )
+                    def _on_rot_chat2(cli): self.client = cli
+                    response = chat_router.execute_with_retry(_do_cons, on_rotate=_on_rot_chat2)
                     
                     if response.text:
                         json_text = self._extract_json_text(response.text)
@@ -427,10 +437,13 @@ class MemoryWorker:
                                 if new_count >= 3:
                                     continue
                                 fact_text = res["fact_text"]
-                                embed_res = self.client.models.embed_content(
-                                    model='gemini-embedding-001',
-                                    contents=fact_text
-                                )
+                                def _do_embed2(cli):
+                                    return cli.models.embed_content(
+                                        model='gemini-embedding-001',
+                                        contents=fact_text
+                                    )
+                                def _on_rot_embed2(cli): self.client_embed = cli
+                                embed_res = embed_router.execute_with_retry(_do_embed2, on_rotate=_on_rot_embed2)
                                 embedding = embed_res.embeddings[0].values
 
                                 # 先查相似印记，命中则走 update，避免长期重复堆积

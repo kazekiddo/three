@@ -10,6 +10,8 @@ from telegram.error import TimedOut, NetworkError
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google import genai
 from google.genai import types
+from key_router import chat_router, embed_router, image_router
+from google.genai.errors import APIError
 from database import Database
 import datetime
 import time
@@ -46,8 +48,6 @@ os.makedirs(MEDIA_DIR, exist_ok=True)
 DEFAULT_CHAT_MODEL = "gemini-3-flash-preview"
 SUPPORTED_CHAT_MODELS = [
     "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-2.5-flash",
 ]
 
 def _parse_time_range(message):
@@ -147,26 +147,22 @@ def _parse_time_range(message):
 class ChatAI:
     def __init__(self, model=DEFAULT_CHAT_MODEL, api_key=None, system_instruction=None, character_id=None):
         """初始化聊天AI"""
-        if api_key is None:
-            api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')
-        
-        if not api_key:
-            raise ValueError("请设置 GOOGLE_API_KEY 或 GEMINI_API_KEY 环境变量")
-        
         # Gemini 请求超时与重试（避免长输出或网络抖动导致 Timed out）
         timeout_ms = 120000
         retry_attempts = 3
-        self.client = genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(
-                timeout=timeout_ms,
-                retry_options=types.HttpRetryOptions(
-                    attempts=retry_attempts,
-                    initial_delay=1.0,
-                    max_delay=10.0
-                )
+        
+        self.http_opts = types.HttpOptions(
+            timeout=timeout_ms,
+            retry_options=types.HttpRetryOptions(
+                attempts=retry_attempts,
+                initial_delay=1.0,
+                max_delay=10.0
             )
         )
+        
+        self.client = chat_router.get_client(http_options=self.http_opts)
+        self.client_embed = embed_router.get_client(http_options=self.http_opts)
+        self.client_image = image_router.get_client(http_options=self.http_opts)
         self.model = model
         self.character_id = character_id
         self.system_instruction = system_instruction
@@ -175,7 +171,7 @@ class ChatAI:
         self.last_user_message_timestamp = None  # 只在用户发消息时更新，供主动发言的 30 分钟门槛使用
         self.last_prefix_timestamp = None
         self.enable_web_search = os.getenv("ENABLE_WEB_SEARCH", "true").lower() in ("1", "true", "yes", "on")
-        self.enable_prompt_cache = os.getenv("ENABLE_PROMPT_CACHE", "true").lower() in ("1", "true", "yes", "on")
+        self.enable_prompt_cache = os.getenv("ENABLE_PROMPT_CACHE", "false").lower() in ("1", "true", "yes", "on")
         self.prompt_cache_ttl = os.getenv("PROMPT_CACHE_TTL", "86400s")
         self.proactive_streak_count = 0
         self.proactive_streak_date = None
@@ -501,15 +497,18 @@ class ChatAI:
                         logger.error(f"加载用户设定图失败: {e}")
 
                 # 调用 gemini-3.1-flash-image-preview 生成图片，暂不设置不支持的 image_size
-                response = self.client.models.generate_content(
-                    model='gemini-3.1-flash-image-preview',
-                    contents=generation_contents,
-                    config=types.GenerateContentConfig(
-                        image_config=types.ImageConfig(
-                            aspect_ratio="3:4"
+                def _do_gen_image(cli):
+                    return cli.models.generate_content(
+                        model='gemini-3.1-flash-image-preview',
+                        contents=generation_contents,
+                        config=types.GenerateContentConfig(
+                            image_config=types.ImageConfig(
+                                aspect_ratio="3:4"
+                            )
                         )
                     )
-                )
+                def _on_rot_image(cli): self.client_image = cli
+                response = image_router.execute_with_retry(_do_gen_image, get_client_kwargs={'http_options': self.http_opts}, on_rotate=_on_rot_image)
                 
                 saved_path = None
                 parts_list = response.parts if response.parts else []
@@ -1598,14 +1597,17 @@ class ChatAI:
         )
 
         try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type='application/json',
-                    temperature=0.25
+            def _do_infer(cli):
+                return cli.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type='application/json',
+                        temperature=0.25
+                    )
                 )
-            )
+            def _on_rot_chat(cli): self.client = cli
+            response = chat_router.execute_with_retry(_do_infer, get_client_kwargs={'http_options': self.http_opts}, on_rotate=_on_rot_chat)
             raw_text = response.text.strip() if response and response.text else ""
             payload = self._safe_json_loads(raw_text) if raw_text else {}
             normalized = self._normalize_dynamic_state(payload.get("state"), fallback=carryover_state or existing_state)
@@ -1858,14 +1860,17 @@ class ChatAI:
             "7) 只有当来源数据日期等于今天日期时，才能写“今天”；否则必须写“最新可得日期是 XXXX-XX-XX（非今日）”。\n\n"
             f"用户问题：{query}"
         )
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                tools=[types.Tool(google_search=types.GoogleSearch())]
+        def _do_search(cli):
+            return cli.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    tools=[types.Tool(google_search=types.GoogleSearch())]
+                )
             )
-        )
+        def _on_rot_chat(cli): self.client = cli
+        response = chat_router.execute_with_retry(_do_search, get_client_kwargs={'http_options': self.http_opts}, on_rotate=_on_rot_chat)
 
         summary = self._extract_response_text(response)
         if not summary:
@@ -1897,14 +1902,17 @@ class ChatAI:
             f"对话内容：\n{conversation_text}"
         )
         try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type='application/json',
-                    temperature=0.0
+            def _do_extract(cli):
+                return cli.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type='application/json',
+                        temperature=0.0
+                    )
                 )
-            )
+            def _on_rot_chat(cli): self.client = cli
+            response = chat_router.execute_with_retry(_do_extract, get_client_kwargs={'http_options': self.http_opts}, on_rotate=_on_rot_chat)
             raw_text = response.text.strip() if response and response.text else ""
             if not raw_text:
                 return []
@@ -2069,10 +2077,13 @@ class ChatAI:
         if self.character_id:
             try:
                 # 获取消息的 embedding 用于检索
-                embed_response = self.client.models.embed_content(
-                    model='gemini-embedding-001',
-                    contents=message
-                )
+                def _do_embed(cli):
+                    return cli.models.embed_content(
+                        model='gemini-embedding-001',
+                        contents=message
+                    )
+                def _on_rot_embed(cli): self.client_embed = cli
+                embed_response = embed_router.execute_with_retry(_do_embed, get_client_kwargs={'http_options': self.http_opts}, on_rotate=_on_rot_embed)
                 embedding = embed_response.embeddings[0].values
                 
                 # 调取最相关的3条人格特质
@@ -2201,11 +2212,21 @@ class ChatAI:
             message_parts.append(types.Part.from_bytes(data=image_data, mime_type=image_mime_type))
 
         # 获取AI回复（automatic_function_calling 在 send_message 内部自动完成，response 是最终响应）
-        if self.cached_content_name:
-            response = self._send_message_with_manual_tools(message_parts, "send_message")
-        else:
-            response = self.chat.send_message(message_parts)
-            self._log_cache_usage(response, "send_message")
+        def _on_rot_chat_send(cli):
+            self.client = cli
+            history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else []
+            self.chat = self.client.chats.create(
+                model=self.model,
+                config=self._build_chat_config(),
+                history=history
+            )
+        def _do_chat_send(cli):
+            if self.cached_content_name:
+                return self._send_message_with_manual_tools(message_parts, "send_message")
+            else:
+                return self.chat.send_message(message_parts)
+        response = chat_router.execute_with_retry(_do_chat_send, get_client_kwargs={'http_options': self.http_opts}, on_rotate=_on_rot_chat_send)
+        self._log_cache_usage(response, "send_message")
         response_text = ""
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
@@ -2348,11 +2369,21 @@ class ChatAI:
 
         self.pending_output_image = None
 
-        if self.cached_content_name:
-            response = self._send_message_with_manual_tools([trigger_msg], "send_proactive_message")
-        else:
-            response = self.chat.send_message([trigger_msg])
-            self._log_cache_usage(response, "send_proactive_message")
+        def _on_rot_chat_proact(cli):
+            self.client = cli
+            history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else []
+            self.chat = self.client.chats.create(
+                model=self.model,
+                config=self._build_chat_config(),
+                history=history
+            )
+        def _do_chat_proact(cli):
+            if self.cached_content_name:
+                return self._send_message_with_manual_tools([trigger_msg], "send_proactive_message")
+            else:
+                return self.chat.send_message([trigger_msg])
+        response = chat_router.execute_with_retry(_do_chat_proact, get_client_kwargs={'http_options': self.http_opts}, on_rotate=_on_rot_chat_proact)
+        self._log_cache_usage(response, "send_proactive_message")
 
         response_text = ""
         if response.candidates and response.candidates[0].content.parts:
@@ -3090,17 +3121,17 @@ def evaluate_proactive_intent(chat_ai, user_silence_seconds: float, total_silenc
     )
 
     try:
-        api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')
-        client = genai.Client(api_key=api_key)
         config = types.GenerateContentConfig(
             system_instruction=chat_ai.system_instruction,
             temperature=1.2  # 略高温度，让决策更有随机性（有时想发有时不想）
         )
-        response = client.models.generate_content(
-            model=chat_ai.model,
-            contents=prompt,
-            config=config
-        )
+        def _do_eval(cli):
+            return cli.models.generate_content(
+                model=chat_ai.model,
+                contents=prompt,
+                config=config
+            )
+        response = chat_router.execute_with_retry(_do_eval)
         answer_text = ""
         if response and getattr(response, "text", None):
             answer_text = response.text

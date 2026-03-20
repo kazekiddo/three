@@ -8,6 +8,8 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google import genai
 from google.genai import types
+from key_router import image_router
+from google.genai.errors import APIError
 
 # 配置日志
 logging.basicConfig(
@@ -29,11 +31,7 @@ user_sessions = {}
 
 class HelperAI:
     def __init__(self, mode, system_instruction):
-        api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')
-        if not api_key:
-            raise ValueError("请设置 GOOGLE_API_KEY 或 GEMINI_API_KEY")
-        
-        self.client = genai.Client(api_key=api_key)
+        self.client = image_router.get_client()
         self.mode = mode
         
         history = []
@@ -90,7 +88,22 @@ class HelperAI:
             parts.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
         parts.append(types.Part.from_text(text=full_prompt))
 
-        response = self.chat.send_message(parts)
+        def _on_rot_img_chat(cli):
+            self.client = cli
+            history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else []
+            self.chat = self.client.chats.create(
+                model='gemini-3.1-flash-image-preview',
+                config=types.GenerateContentConfig(
+                    system_instruction=self.chat._config.systemInstruction if hasattr(self.chat, '_config') else None,
+                    response_modalities=['TEXT', 'IMAGE'],
+                    image_config=types.ImageConfig(aspect_ratio="3:4")
+                ),
+                history=history
+            )
+        def _do_img_chat_send(cli):
+            return self.chat.send_message(parts)
+
+        response = image_router.execute_with_retry(_do_img_chat_send, on_rotate=_on_rot_img_chat)
         
         for part in response.parts:
             if part.inline_data is not None:
