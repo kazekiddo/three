@@ -2212,20 +2212,19 @@ class ChatAI:
             message_parts.append(types.Part.from_bytes(data=image_data, mime_type=image_mime_type))
 
         # 获取AI回复（automatic_function_calling 在 send_message 内部自动完成，response 是最终响应）
-        def _on_rot_chat_send(cli):
+        def _do_chat_send(cli):
             self.client = cli
-            history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else []
+            history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else getattr(self.chat, "history", [])
             self.chat = self.client.chats.create(
                 model=self.model,
                 config=self._build_chat_config(),
                 history=history
             )
-        def _do_chat_send(cli):
             if self.cached_content_name:
                 return self._send_message_with_manual_tools(message_parts, "send_message")
             else:
                 return self.chat.send_message(message_parts)
-        response = chat_router.execute_with_retry(_do_chat_send, get_client_kwargs={'http_options': self.http_opts}, on_rotate=_on_rot_chat_send)
+        response = chat_router.execute_with_retry(_do_chat_send, get_client_kwargs={'http_options': self.http_opts})
         self._log_cache_usage(response, "send_message")
         response_text = ""
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
@@ -2369,20 +2368,19 @@ class ChatAI:
 
         self.pending_output_image = None
 
-        def _on_rot_chat_proact(cli):
+        def _do_chat_proact(cli):
             self.client = cli
-            history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else []
+            history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else getattr(self.chat, "history", [])
             self.chat = self.client.chats.create(
                 model=self.model,
                 config=self._build_chat_config(),
                 history=history
             )
-        def _do_chat_proact(cli):
             if self.cached_content_name:
                 return self._send_message_with_manual_tools([trigger_msg], "send_proactive_message")
             else:
                 return self.chat.send_message([trigger_msg])
-        response = chat_router.execute_with_retry(_do_chat_proact, get_client_kwargs={'http_options': self.http_opts}, on_rotate=_on_rot_chat_proact)
+        response = chat_router.execute_with_retry(_do_chat_proact, get_client_kwargs={'http_options': self.http_opts})
         self._log_cache_usage(response, "send_proactive_message")
 
         response_text = ""

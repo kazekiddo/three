@@ -88,9 +88,9 @@ class HelperAI:
             parts.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
         parts.append(types.Part.from_text(text=full_prompt))
 
-        def _on_rot_img_chat(cli):
+        def _do_img_chat_send(cli):
             self.client = cli
-            history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else []
+            history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else getattr(self.chat, "history", [])
             self.chat = self.client.chats.create(
                 model='gemini-3.1-flash-image-preview',
                 config=types.GenerateContentConfig(
@@ -100,10 +100,9 @@ class HelperAI:
                 ),
                 history=history
             )
-        def _do_img_chat_send(cli):
             return self.chat.send_message(parts)
 
-        response = image_router.execute_with_retry(_do_img_chat_send, on_rotate=_on_rot_img_chat)
+        response = image_router.execute_with_retry(_do_img_chat_send)
         
         for part in response.parts:
             if part.inline_data is not None:
