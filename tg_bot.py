@@ -989,7 +989,7 @@ class ChatAI:
     def on_proactive_sent(self, now_dt: datetime.datetime):
         self._ensure_proactive_day_state(now_dt)
         self.proactive_streak_count += 1
-        if self.proactive_streak_count >= 5:
+        if self.proactive_streak_count >= 1:
             self.proactive_blocked_date = now_dt.date()
 
     def _should_add_wakeup_prompt(self) -> bool:
@@ -3269,6 +3269,7 @@ async def proactive_check_job(context: ContextTypes.DEFAULT_TYPE):
                 should_send, trigger_hint = evaluate_proactive_intent(chat_ai, user_silence_seconds, total_silence_seconds)
                 if not should_send:
                     logger.error(f"[proactive_check] user={user_id} evaluate_proactive_intent=NO")
+                    chat_ai.on_proactive_sent(now_dt)
                     continue
 
                 # AI 生成主动消息（同步调用）
@@ -3422,6 +3423,19 @@ def main():
     # 每天凌晨四点（北京时间 UTC+8）执行一次巩固。UTC 20:00 是北京时间 04:00
     consolidate_time = datetime.time(hour=20, minute=0, second=0, tzinfo=datetime.timezone.utc)
     job_queue.run_daily(memory_consolidate_job, time=consolidate_time)
+
+    # 每天凌晨五点（北京时间 UTC+8）重置 API Key 游标。UTC 21:00 是 05:00
+    async def reset_keys_job(context: ContextTypes.DEFAULT_TYPE):
+        try:
+            from key_router import chat_router, embed_router, image_router
+            chat_router.reset()
+            embed_router.reset()
+            image_router.reset()
+            logger.error("已执行凌晨 5 点 API Key 游标全局重置")
+        except Exception as e:
+            logger.error(f"重置 API Key 游标失败: {e}")
+    reset_time = datetime.time(hour=21, minute=0, second=0, tzinfo=datetime.timezone.utc)
+    job_queue.run_daily(reset_keys_job, time=reset_time)
 
     # AI 主动发消息：首次检查在启动后随机 10~25 分钟触发
     # 之后每轮由 proactive_check_job 自身动态安排下次，间隔同样随机 10~25 分钟，保证无规律感

@@ -46,6 +46,10 @@ class KeyRouter:
             self.idx = (self.idx + 1) % len(self.keys)
             logger.error(f"[{self.name} Router] Rotated API key to index {self.idx}")
 
+    def reset(self):
+        self.idx = 0
+        logger.error(f"[{self.name} Router] 游标已强制重置为 0")
+
     def get_client(self, **kwargs):
         key = self.get_key()
         if not key:
