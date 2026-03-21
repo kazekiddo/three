@@ -3421,17 +3421,18 @@ def main():
     consolidate_time = datetime.time(hour=20, minute=0, second=0, tzinfo=datetime.timezone.utc)
     job_queue.run_daily(memory_consolidate_job, time=consolidate_time)
 
-    # 每天凌晨五点（北京时间 UTC+8）重置 API Key 游标。UTC 21:00 是 05:00
+    import zoneinfo
+    # 每天太平洋时间午夜零30分重置 API Key 游标，预留半小时以防 Google API 后台配额重置出现系统延迟。
     async def reset_keys_job(context: ContextTypes.DEFAULT_TYPE):
         try:
             from key_router import chat_router, embed_router, image_router
             chat_router.reset()
             embed_router.reset()
             image_router.reset()
-            logger.error("已执行凌晨 5 点 API Key 游标全局重置")
+            logger.error("已执行太平洋时间午夜零30分 API Key 游标全局重置")
         except Exception as e:
             logger.error(f"重置 API Key 游标失败: {e}")
-    reset_time = datetime.time(hour=21, minute=0, second=0, tzinfo=datetime.timezone.utc)
+    reset_time = datetime.time(hour=0, minute=30, second=0, tzinfo=zoneinfo.ZoneInfo("America/Los_Angeles"))
     job_queue.run_daily(reset_keys_job, time=reset_time)
 
     # AI 主动发消息：首次检查在启动后随机 10~25 分钟触发
