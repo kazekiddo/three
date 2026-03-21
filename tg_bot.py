@@ -2751,7 +2751,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # 用户先扔：先评论，再让 AI 扔并宣布胜负
-        prompt1 = f"[系统骰子结果] 对方刚刚掷出点数={user_val}。请用一句话自然评论这次结果。"
+        prompt1 = f"[系统骰子结果] 对方刚刚掷出点数={user_val}，你还没有扔。请用一句话自然评论这次结果。"
         reply1, _ = chat_ai.send_message(prompt1, save_user_message=False)
         if reply1.strip():
             await send_ai_reply(reply1)
@@ -2792,7 +2792,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         ai_val = msg_ai.dice.value
 
-        prompt1 = f"[系统骰子结果] 你刚刚掷出点数={ai_val}。请用一句话自然评论这次结果。"
+        prompt1 = f"[系统骰子结果] 你刚刚掷出点数={ai_val}，对方还没扔。请用一句话自然评论这次结果。"
         reply1, _ = chat_ai.send_message(prompt1, save_user_message=False)
         if reply1.strip():
             await send_ai_reply(reply1)
