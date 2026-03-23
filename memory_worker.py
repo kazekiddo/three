@@ -36,8 +36,9 @@ class MemoryWorker:
         "自我特质", "他者画像", "关系羁绊", "情感锚点"
     }
 
-    def __init__(self, api_key=None, key_index=None):
+    def __init__(self, api_key=None, key_index=None, on_empty_response=None):
         self.key_index = key_index  # 仅影响 chat 模型
+        self.on_empty_response = on_empty_response  # Gemini 返回空响应时的回调
         if key_index is not None:
             self.client = chat_router.get_client_by_index(key_index)
         else:
@@ -368,7 +369,10 @@ class MemoryWorker:
                             if processed_ids:
                                 self.db.mark_messages_extracted(processed_ids)
                         else:
-                            logger.warning(f"角色 {cid} 周期 {cycle_range_text}: LLM 返回空响应，跳过本周期（消息未标记已提取，下次重试）")
+                            msg = f"过滤任务：角色 {cid} 周期 {cycle_range_text} Gemini 返回空响应，已跳过"
+                            logger.warning(msg)
+                            if self.on_empty_response:
+                                self.on_empty_response(msg)
                             break  # 退出 while True，避免同一周期无限重试
                     except Exception as e:
                         logger.error(f"提取情景及事件失败 对于角色 {cid} 周期 {cycle_range_text}: {e}")
@@ -479,10 +483,15 @@ class MemoryWorker:
                                     evidence_span=res["evidence_span"]
                                 )
                                 new_count += 1
-                    
-                    # 3. 标记这些情景记忆为已处理
-                    processed_ids = [m['id'] for m in new_memories]
-                    self.db.mark_episodic_consolidated(processed_ids)
+
+                            # 3. 标记这些情景记忆为已处理
+                            processed_ids = [m['id'] for m in new_memories]
+                            self.db.mark_episodic_consolidated(processed_ids)
+                    else:
+                        msg = f"巩固任务：角色 {cid} Gemini 返回空响应，已跳过"
+                        logger.warning(msg)
+                        if self.on_empty_response:
+                            self.on_empty_response(msg)
                     
                 except Exception as e:
                     logger.error(f"合并任务子逻辑失败 {cid}: {e}")

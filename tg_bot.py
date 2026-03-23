@@ -3408,14 +3408,28 @@ def main():
     
     # 启动后台记忆任务
     async def memory_filter_job(context: ContextTypes.DEFAULT_TYPE):
+        warnings = []
+        def _on_empty(msg): warnings.append(msg)
         from memory_worker import MemoryWorker
-        worker = MemoryWorker()
+        worker = MemoryWorker(on_empty_response=_on_empty)
         await worker.filter_task()
+        for w in warnings:
+            try:
+                await context.bot.send_message(chat_id=ALLOWED_USER_ID, text=f"⚠️ {w}")
+            except Exception:
+                pass
 
     async def memory_consolidate_job(context: ContextTypes.DEFAULT_TYPE):
+        warnings = []
+        def _on_empty(msg): warnings.append(msg)
         from memory_worker import MemoryWorker
-        worker = MemoryWorker()
+        worker = MemoryWorker(on_empty_response=_on_empty)
         await worker.consolidate_task()
+        for w in warnings:
+            try:
+                await context.bot.send_message(chat_id=ALLOWED_USER_ID, text=f"⚠️ {w}")
+            except Exception:
+                pass
 
     job_queue = application.job_queue
 
