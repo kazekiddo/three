@@ -37,13 +37,12 @@ class MemoryWorker:
     }
 
     def __init__(self, api_key=None, key_index=None):
-        self.key_index = key_index
+        self.key_index = key_index  # 仅影响 chat 模型
         if key_index is not None:
             self.client = chat_router.get_client_by_index(key_index)
-            self.client_embed = embed_router.get_client_by_index(key_index)
         else:
             self.client = chat_router.get_client()
-            self.client_embed = embed_router.get_client()
+        self.client_embed = embed_router.get_client()
         self.db = Database()
 
     def _exec_chat(self, action_fn, on_rotate=None):
@@ -51,12 +50,6 @@ class MemoryWorker:
         if self.key_index is not None:
             return chat_router.execute_with_fixed_key(self.key_index, action_fn)
         return chat_router.execute_with_retry(action_fn, on_rotate=on_rotate)
-
-    def _exec_embed(self, action_fn, on_rotate=None):
-        """统一 embed API 调用入口：有 key_index 时固定 key，否则走轮转"""
-        if self.key_index is not None:
-            return embed_router.execute_with_fixed_key(self.key_index, action_fn)
-        return embed_router.execute_with_retry(action_fn, on_rotate=on_rotate)
 
     @staticmethod
     def _extract_json_text(raw_text):
@@ -346,7 +339,7 @@ class MemoryWorker:
                                             contents=mem["content"]
                                         )
                                     def _on_rot_embed1(cli): self.client_embed = cli
-                                    embed_res = self._exec_embed(_do_embed1, on_rotate=_on_rot_embed1)
+                                    embed_res = embed_router.execute_with_retry(_do_embed1, on_rotate=_on_rot_embed1)
                                     embedding = embed_res.embeddings[0].values
                                 except Exception:
                                     embedding = None
@@ -464,7 +457,7 @@ class MemoryWorker:
                                         contents=fact_text
                                     )
                                 def _on_rot_embed2(cli): self.client_embed = cli
-                                embed_res = self._exec_embed(_do_embed2, on_rotate=_on_rot_embed2)
+                                embed_res = embed_router.execute_with_retry(_do_embed2, on_rotate=_on_rot_embed2)
                                 embedding = embed_res.embeddings[0].values
 
                                 # 先查相似印记，命中则走 update，避免长期重复堆积
