@@ -2725,7 +2725,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
     # 命中以“...”结尾：只落库与历史，不请求 Gemini
-    if user_message.strip().endswith("...") or user_message.strip().endswith("。。。"):
+    # 兼容多种省略号，包括三个点、单字符省略号、中文省略号，以及两个点及以上的点号序列
+    if re.search(r'(\.{2,}|。{2,}|…+)$', user_message.strip()):
         context_prefix = save_user_message_to_db(
             user_message,
             media_path=media_path,
