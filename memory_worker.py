@@ -170,6 +170,7 @@ class MemoryWorker:
 
         narrative = data.get("relationship_narrative")
         narrative = narrative.strip() if isinstance(narrative, str) else None
+        narrative = narrative or None  # 空字符串转 None，保证 SQL COALESCE 不覆盖旧值
 
         return normalized_memories, normalized_events, shock_events, narrative
 
@@ -352,10 +353,13 @@ class MemoryWorker:
                                 new_narrative=relationship_narrative
                             )
 
-                        # 标记当前周期消息为已处理
-                        processed_ids = [m['id'] for m in cycle_msgs]
-                        if processed_ids:
-                            self.db.mark_messages_extracted(processed_ids)
+                            # 标记当前周期消息为已处理
+                            processed_ids = [m['id'] for m in cycle_msgs]
+                            if processed_ids:
+                                self.db.mark_messages_extracted(processed_ids)
+                        else:
+                            logger.warning(f"角色 {cid} 周期 {cycle_range_text}: LLM 返回空响应，跳过本周期（消息未标记已提取，下次重试）")
+                            break  # 退出 while True，避免同一周期无限重试
                     except Exception as e:
                         logger.error(f"提取情景及事件失败 对于角色 {cid} 周期 {cycle_range_text}: {e}")
                         continue
