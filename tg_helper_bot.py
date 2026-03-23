@@ -33,6 +33,7 @@ class HelperAI:
     def __init__(self, mode, system_instruction):
         self.client = image_router.get_client()
         self.mode = mode
+        self.system_instruction = system_instruction
         
         history = []
         # 根据模式加载视觉参考
@@ -94,7 +95,7 @@ class HelperAI:
             self.chat = self.client.chats.create(
                 model='gemini-3.1-flash-image-preview',
                 config=types.GenerateContentConfig(
-                    system_instruction=self.chat._config.systemInstruction if hasattr(self.chat, '_config') else None,
+                    system_instruction=self.system_instruction,
                     response_modalities=['TEXT', 'IMAGE'],
                     image_config=types.ImageConfig(aspect_ratio="3:4")
                 ),
