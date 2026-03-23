@@ -56,6 +56,23 @@ class KeyRouter:
             raise ValueError(f"No API keys configured for {self}.")
         return genai.Client(api_key=key, **kwargs)
 
+    def get_client_by_index(self, idx, **kwargs):
+        """用指定 index 的 key 创建 client，不影响当前游标"""
+        if not self.keys:
+            raise ValueError(f"No API keys configured for {self.name}.")
+        if idx < 0 or idx >= len(self.keys):
+            raise ValueError(f"[{self.name}] key index {idx} 超出范围 (共 {len(self.keys)} 个 key, 0~{len(self.keys)-1})")
+        key = self.keys[idx]
+        return genai.Client(api_key=key, **kwargs)
+
+    def execute_with_fixed_key(self, key_index, action_fn, **get_client_kwargs):
+        """用指定 index 的 key 执行单次调用，不影响当前游标，不做轮转"""
+        client = self.get_client_by_index(key_index, **get_client_kwargs)
+        key_str = self.keys[key_index]
+        masked_key = key_str[:12] + "..." + key_str[-4:] if len(key_str) > 16 else key_str
+        logger.error(f"[{self.name} Router] 手动指定 Key (index {key_index}): {masked_key}")
+        return action_fn(client)
+
     def execute_with_retry(self, action_fn, get_client_kwargs=None, on_rotate=None):
         """
         Executes action_fn(client) and wraps it with rotation logic.

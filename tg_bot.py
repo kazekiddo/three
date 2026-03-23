@@ -2945,13 +2945,21 @@ async def delete_from_last_user(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(msg)
 
 async def trigger_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /filter 命令，手动触发 filter_task"""
+    """处理 /filter 命令，手动触发 filter_task。可选参数：key index（如 /filter 2）"""
     import asyncio
-    await update.message.reply_text("已触发过滤任务 (filter_task)，正在后台执行...")
+    key_index = None
+    if context.args:
+        try:
+            key_index = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("参数格式错误，请使用 key 序号（从 0 开始），例如：/filter 2")
+            return
+    key_hint = f"（使用 key index {key_index}）" if key_index is not None else ""
+    await update.message.reply_text(f"已触发过滤任务 (filter_task){key_hint}，正在后台执行...")
     async def run_task():
         try:
             from memory_worker import MemoryWorker
-            worker = MemoryWorker()
+            worker = MemoryWorker(key_index=key_index)
             await worker.filter_task()
             await context.bot.send_message(chat_id=update.effective_chat.id, text="过滤任务 (filter_task) 执行完成！")
         except Exception as e:
@@ -2960,13 +2968,21 @@ async def trigger_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(run_task())
 
 async def trigger_consolidate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /consolidate 命令，手动触发 consolidate_task"""
+    """处理 /consolidate 命令，手动触发 consolidate_task。可选参数：key index（如 /consolidate 2）"""
     import asyncio
-    await update.message.reply_text("已触发巩固任务 (consolidate_task)，正在后台执行...")
+    key_index = None
+    if context.args:
+        try:
+            key_index = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("参数格式错误，请使用 key 序号（从 0 开始），例如：/consolidate 2")
+            return
+    key_hint = f"（使用 key index {key_index}）" if key_index is not None else ""
+    await update.message.reply_text(f"已触发巩固任务 (consolidate_task){key_hint}，正在后台执行...")
     async def run_task():
         try:
             from memory_worker import MemoryWorker
-            worker = MemoryWorker()
+            worker = MemoryWorker(key_index=key_index)
             await worker.consolidate_task()
             await context.bot.send_message(chat_id=update.effective_chat.id, text="巩固任务 (consolidate_task) 执行完成！")
         except Exception as e:
