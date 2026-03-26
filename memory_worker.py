@@ -26,7 +26,6 @@ SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
-    {"category": "HARM_CATEGORY_UNSPECIFIED", "threshold": "BLOCK_NONE"},
 ]
 class EpisodicMemorySummary(BaseModel):
     content: str
@@ -413,6 +412,23 @@ class MemoryWorker:
                             break  # 退出 while True，避免同一周期无限重试
                     except Exception as e:
                         logger.error(f"提取情景及事件失败 对于角色 {cid} 周期 {cycle_range_text}: {e}")
+                        # If this worker was invoked with a fixed key index, don't
+                        # keep retrying the same bad request in a tight loop —
+                        # break out so the caller can observe and handle the error.
+                        try:
+                            is_api_err = isinstance(e, APIError)
+                        except Exception:
+                            is_api_err = False
+
+                        # Stop looping for explicit 400 invalid-argument errors
+                        if is_api_err and getattr(e, 'code', None) == 400:
+                            break
+
+                        # If a fixed key was provided, a retry won't help; break.
+                        if self.key_index is not None:
+                            break
+
+                        # Otherwise continue so the router can rotate keys and retry.
                         continue
                 
         except Exception as e:
