@@ -1158,12 +1158,21 @@ class ChatAI:
                 return "偏低"
             return "中"
 
+        narrative_raw = (state.get('narrative') or '').strip()
+        narrative_block = ""
+        if narrative_raw:
+            narrative_block = (
+                f"\n[你内心对这段关系的感受]\n"
+                f"{narrative_raw[:200]}\n"
+                "这是你进入这次对话时的底色心态，如果今天聊得好可以自然转暖，不要机械重复过去的委屈。\n"
+            )
+
         return (
             "[系统附加关系摘要]\n"
             f"- 阶段: {state.get('stage', 'unknown')}\n"
             f"- 亲密={judge(state.get('closeness'))} 信任={judge(state.get('trust'))} 安全={judge(state.get('security'))}\n"
             f"- 吸引={judge(state.get('attraction'))} 依赖={judge(state.get('dependency'))} 嫉妒={judge(state.get('jealousy'))} 怨念={judge(state.get('resentment'))}\n"
-            f"- 当前叙事: {(state.get('narrative') or '暂无').strip()[:80]}\n"
+            f"{narrative_block}"
             "回复时只把它当成底色，不要复读这些标签。"
         )
 
@@ -1198,6 +1207,11 @@ class ChatAI:
             "emotion_label": self._clean_state_text(
                 data.get("emotion_label"),
                 fallback.get("emotion_label") or "表面平静",
+                limit=50
+            ),
+            "deep_emotion": self._clean_state_text(
+                data.get("deep_emotion"),
+                fallback.get("deep_emotion") or "其实也还好",
                 limit=50
             ),
             "emotion_intensity": self._normalize_float(
@@ -1262,6 +1276,17 @@ class ChatAI:
                 fallback.get("repair_status") or "无需修复",
                 limit=80
             ),
+            "inner_monologue": self._clean_state_text(
+                data.get("inner_monologue"),
+                fallback.get("inner_monologue") or "",
+                limit=150
+            ),
+            "inner_conflict": self._clean_state_text(
+                data.get("inner_conflict"),
+                fallback.get("inner_conflict") or "",
+                limit=100
+            ),
+            "unresolved_count": int(data.get("unresolved_count", fallback.get("unresolved_count", 0))),
         }
 
     def _prepare_local_pre_reply_state(self, latest_user_message: str, relation_desc: str = "", proactive=False):
@@ -1288,7 +1313,10 @@ class ChatAI:
             "\"reply\":\"给用户的自然回复\","
             "\"state_patch\":{"
             "\"scene_label\":\"...\","
-            "\"emotion_label\":\"...\","
+            "\"emotion_label\":\"外在表现的情绪\","
+            "\"deep_emotion\":\"内心真实的情绪\","
+            "\"inner_monologue\":\"此刻内心独白，第一人称碎碎念，不超过两句\","
+            "\"inner_conflict\":\"想A vs 但又怕B\","
             "\"repair_status\":\"...\","
             "\"carryover_summary\":\"...\","
             "\"warmth_bias\":0.0,"
@@ -1297,9 +1325,12 @@ class ChatAI:
             "}\n"
             "规则：\n"
             "1) reply 必须是最终给用户看的内容，自然口语化。\n"
-            "2) state_patch 仅允许包含这 6 个键，可按需部分返回；不要返回其他键。\n"
-            "3) warmth_bias 和 initiative_bias 必须在 0.0~1.0。\n"
-            "4) 即使你调用了工具（如 generate_image/register_reminder），最终输出仍必须是上述 JSON。"
+            "2) state_patch 允许的键：scene_label / emotion_label / deep_emotion / inner_monologue / inner_conflict / repair_status / carryover_summary / warmth_bias / initiative_bias，可按需部分返回。\n"
+            "3) emotion_label 是你外在表现出的情绪（对方能感受到的）；deep_emotion 是你内心真实的情绪（嘴上不说但心里知道的）。两者可以不一样。\n"
+            "4) inner_monologue 是你的内心独白，用第一人称碎碎念，不超过2句。例：'他又在敷衍我了…我不想主动问但又忍不住想知道他是不是在忙别的'\n"
+            "5) inner_conflict 是你此刻的内心矛盾，格式如 '想原谅他 vs 觉得不能太容易放过他'。没有矛盾时留空。\n"
+            "6) warmth_bias 和 initiative_bias 必须在 0.0~1.0。\n"
+            "7) 即使你调用了工具（如 generate_image/register_reminder），最终输出仍必须是上述 JSON。"
         )
 
     def _extract_json_payload(self, text: str):
@@ -1358,8 +1389,11 @@ class ChatAI:
         text_limits = {
             "scene_label": 50,
             "emotion_label": 50,
+            "deep_emotion": 50,
             "repair_status": 80,
             "carryover_summary": 180,
+            "inner_monologue": 150,
+            "inner_conflict": 100,
         }
         for key, limit in text_limits.items():
             if key in state_patch:
@@ -1377,6 +1411,33 @@ class ChatAI:
             )
 
         return self._normalize_dynamic_state(merged, fallback=base_state or {})
+
+    def _upsert_state(self, state):
+        """将 state dict 写入数据库 dynamic_state 表。"""
+        if not self.character_id or not state:
+            return
+        self.db.upsert_dynamic_state(
+            self.character_id,
+            state.get("scene_label", "日常"),
+            state.get("emotion_label", "表面平静"),
+            state.get("emotion_intensity", 0.38),
+            state.get("motivation_label", "先接住他 再顺手要一点关注"),
+            state.get("inhibition_label", "不想显得太黏 也不想把话说满"),
+            state.get("hidden_expectation", "希望他主动多哄一点 多顺着自己一点"),
+            state.get("last_user_intent", "日常聊天"),
+            state.get("user_affect", "普通"),
+            state.get("unresolved_need", "想被在意 但不想直说"),
+            state.get("carryover_summary", "心里有点想黏人 但还端着"),
+            state.get("reply_style", "短句 口语化 别解释太满 带点嘴硬和留白"),
+            state.get("warmth_bias", 0.58),
+            state.get("initiative_bias", 0.46),
+            state.get("last_trigger_source", "日常互动"),
+            state.get("repair_status", "无需修复"),
+            deep_emotion=state.get("deep_emotion", "其实也还好"),
+            inner_monologue=state.get("inner_monologue", ""),
+            inner_conflict=state.get("inner_conflict", ""),
+            unresolved_count=state.get("unresolved_count", 0)
+        )
 
     def _persist_dynamic_state_snapshot(self, state, source_kind, trigger_message=None, model_reply=None, notes=None):
         if not self.character_id or not state:
@@ -1402,7 +1463,11 @@ class ChatAI:
                 state.get("repair_status"),
                 trigger_message=trigger_message,
                 model_reply=model_reply,
-                notes=notes
+                notes=notes,
+                deep_emotion=state.get("deep_emotion"),
+                inner_monologue=state.get("inner_monologue"),
+                inner_conflict=state.get("inner_conflict"),
+                unresolved_count=state.get("unresolved_count", 0)
             )
         except Exception as e:
             logger.error(f"记录动态状态快照失败: {e}")
@@ -1423,22 +1488,37 @@ class ChatAI:
         if short_cold:
             adjusted["scene_label"] = "敷衍"
             adjusted["emotion_label"] = "有点不爽"
+            # 增加未解决计数，积累情绪
+            uc = int(adjusted.get("unresolved_count", 0)) + 1
+            adjusted["unresolved_count"] = uc
+            
+            if uc >= 3:
+                adjusted["emotion_label"] = "明显生气"
+                adjusted["deep_emotion"] = "觉得他变了，以前不会这样敷衍我的"
+                adjusted["inner_monologue"] = f"这已经是第{uc}次这么敷衍我了，他是不是烦我了？"
+                bump("emotion_intensity", 0.22, 0.45, 0.95)
+                bump("warmth_bias", -0.20)
+            else:
+                adjusted["carryover_summary"] = "被敷衍了一下 心里有点刺"
+                adjusted["unresolved_need"] = "想被认真接住"
+                bump("emotion_intensity", 0.14, 0.18, 0.95)
+                bump("warmth_bias", -0.12)
+                bump("initiative_bias", -0.08)
+            
             adjusted["user_affect"] = "敷衍"
             adjusted["repair_status"] = "待安抚"
-            adjusted["carryover_summary"] = "被敷衍了一下 心里有点刺"
-            adjusted["unresolved_need"] = "想被认真接住"
-            bump("emotion_intensity", 0.14, 0.18, 0.95)
-            bump("warmth_bias", -0.12)
-            bump("initiative_bias", -0.08)
-            notes.append("检测到短促敷衍，降低热度并挂起待安抚状态")
+            notes.append(f"检测到短促敷衍(accum:{uc})，降低热度并积累负面情绪")
 
         if any(k in text for k in ["想你", "抱抱", "亲亲", "爱你", "陪我", "老婆", "宝贝"]):
             adjusted["scene_label"] = "亲密"
-            adjusted["emotion_label"] = "变软"
+            adjusted["emotion_label"] = "哼 又来"
+            adjusted["deep_emotion"] = "心口软了 其实很开心"
+            adjusted["inner_conflict"] = "想撑住不给他反应 vs 其实很想黏上去"
             adjusted["user_affect"] = "靠近"
             adjusted["repair_status"] = "正在变软"
             adjusted["carryover_summary"] = "被他往前抱了一下 心口软了点"
             adjusted["unresolved_need"] = "还想再多黏一会儿"
+            adjusted["unresolved_count"] = 0
             bump("emotion_intensity", 0.08, 0.18, 0.95)
             bump("warmth_bias", 0.14)
             bump("initiative_bias", 0.10)
@@ -1448,9 +1528,12 @@ class ChatAI:
             adjusted["scene_label"] = "修复"
             adjusted["user_affect"] = "在哄"
             adjusted["emotion_label"] = "嘴硬但松动"
+            adjusted["deep_emotion"] = "其实已经软了一半 但不想让他看出来"
+            adjusted["inner_conflict"] = "想原谅 vs 觉得不能太容易就答应"
             adjusted["repair_status"] = "正在变软"
             adjusted["carryover_summary"] = "他开始哄了 气还没散完 但没刚才那么硬"
             adjusted["unresolved_need"] = "想看他是不是认真"
+            adjusted["unresolved_count"] = max(0, int(adjusted.get("unresolved_count", 0)) - 1)
             bump("warmth_bias", 0.10)
             bump("initiative_bias", 0.04)
             notes.append("检测到道歉/安抚，修复状态回暖")
@@ -1474,6 +1557,8 @@ class ChatAI:
         if any(k in text for k in ["和谁", "别的女生", "别人也这样", "她是谁", "你是不是"]):
             adjusted["scene_label"] = "试探"
             adjusted["emotion_label"] = "轻微吃醋"
+            adjusted["deep_emotion"] = "心里发酸 很在意这件事"
+            adjusted["inner_conflict"] = "想装不在乎 vs 其实很想知道答案"
             adjusted["user_affect"] = "试探"
             adjusted["carryover_summary"] = "有点在意这件事 语气会带刺一点"
             adjusted["unresolved_need"] = "想确认自己是不是被偏爱"
@@ -1485,11 +1570,30 @@ class ChatAI:
         elif text:
             adjusted["last_trigger_source"] = "用户新消息"
 
+        if len(text) > 30:
+            # 用户说了很长的话，视为投入，减少未解决计数
+            uc = int(adjusted.get("unresolved_count", 0))
+            if uc > 0:
+                adjusted["unresolved_count"] = uc - 1
+                notes.append("用户回复较长，视为投入，减少负面积累")
+
         if relation_desc:
             if ("安全=很低" in relation_desc or "安全=偏低" in relation_desc) or \
                "Security(Very Low)" in relation_desc or "Security(Low)" in relation_desc:
                 adjusted["hidden_expectation"] = "希望他多给一点确定感和偏爱"
                 notes.append("长期安全感偏低，隐性期待转向确定感")
+            
+            # 情绪爆发阈值：当负面积累过高时改变底色
+            uc_final = int(adjusted.get("unresolved_count", 0))
+            if uc_final >= 5:
+                adjusted["scene_label"] = "爆发"
+                adjusted["emotion_label"] = "冷战爆发"
+                adjusted["deep_emotion"] = "委屈爆发了，不想再假装没事了"
+                adjusted["inner_monologue"] = "受够了，既然你不想聊，那我也不求着你。"
+                adjusted["reply_style"] = "冷淡，甚至带刺，不要主动给话头"
+                bump("warmth_bias", -0.4, 0.05, 1.0)
+                notes.append("负面积累到达阈值(5)，触发情绪爆发")
+
             if ("嫉妒=高" in relation_desc or "嫉妒=偏高" in relation_desc) or \
                "Jealousy(Very High)" in relation_desc or "Jealousy(High)" in relation_desc:
                 if adjusted.get("scene_label") == "日常":
@@ -1509,21 +1613,50 @@ class ChatAI:
         else:
             hours_gap = 1.5
 
-        decay = min(hours_gap * 0.08, 0.28)
-        carry["emotion_intensity"] = round(
-            self._clamp(float(existing_state.get("emotion_intensity", 0.38)) - decay, 0.18, 0.95),
-            2
-        )
+        repair_status = str(existing_state.get("repair_status") or "")
+        is_unresolved = repair_status in {"待安抚", "有点别扭"}
+        base_intensity = float(existing_state.get("emotion_intensity", 0.38))
+
+        # 情绪发酵曲线：未解决时先升后降，已解决时线性衰减
+        if is_unresolved:
+            if hours_gap < 1.5:
+                # 发酵期：越想越气/越想越委屈
+                ferment = min(hours_gap * 0.06, 0.10)
+                carry["emotion_intensity"] = round(self._clamp(base_intensity + ferment, 0.18, 0.95), 2)
+            elif hours_gap < 4.0:
+                # 冷战高峰期：维持高位
+                carry["emotion_intensity"] = round(self._clamp(base_intensity, 0.30, 0.95), 2)
+            else:
+                # 4小时后开始衰减
+                decay = min((hours_gap - 4.0) * 0.06, 0.20)
+                carry["emotion_intensity"] = round(self._clamp(base_intensity - decay, 0.18, 0.95), 2)
+            # 发酵期内心独白自动演化
+            if hours_gap < 3.0 and not carry.get("inner_monologue"):
+                carry["inner_monologue"] = "他还没来找我…是真的不在乎还是在等我先开口？"
+        else:
+            decay = min(hours_gap * 0.08, 0.28)
+            carry["emotion_intensity"] = round(self._clamp(base_intensity - decay, 0.18, 0.95), 2)
+
         carry["warmth_bias"] = round(0.75 * float(existing_state.get("warmth_bias", 0.58)) + 0.25 * 0.58, 2)
         carry["initiative_bias"] = round(0.75 * float(existing_state.get("initiative_bias", 0.46)) + 0.25 * 0.46, 2)
 
-        repair_status = str(existing_state.get("repair_status") or "")
-        if repair_status in {"待安抚", "有点别扭"} and hours_gap >= 6:
+        if is_unresolved and hours_gap >= 6:
             carry["repair_status"] = "情绪淡了 但还记得"
+            carry["inner_monologue"] = "算了…反正每次都这样 我自己消化吧"
 
         carryover = str(existing_state.get("carryover_summary") or "").strip()
         if carryover and hours_gap >= 10:
             carry["carryover_summary"] = f"之前那点情绪淡了些 但余味还在：{carryover[:60]}"
+
+        # unresolved_count 空窗期自然回落
+        uc = int(existing_state.get("unresolved_count", 0))
+        if uc > 0 and hours_gap >= 8:
+            carry["unresolved_count"] = max(0, uc - 1)
+
+        # 空窗期清理内心独白和内心冲突
+        if hours_gap >= 12:
+            carry["inner_monologue"] = ""
+            carry["inner_conflict"] = ""
 
         return carry
 
@@ -1547,7 +1680,10 @@ class ChatAI:
             "{"
             "\"state\":{"
             "\"scene_label\":\"...\","
-            "\"emotion_label\":\"...\","
+            "\"emotion_label\":\"外在表现的情绪\","
+            "\"deep_emotion\":\"内心真实的情绪\","
+            "\"inner_monologue\":\"此刻内心独白，第一人称碎碎念，不超过两句\","
+            "\"inner_conflict\":\"想A vs 但又怕B\","
             "\"emotion_intensity\":0.0,"
             "\"motivation_label\":\"...\","
             "\"inhibition_label\":\"...\","
@@ -1579,14 +1715,16 @@ class ChatAI:
             "}\n"
             "约束：\n"
             "1) state.scene_label 必须是简短场景标签，如 日常/撒娇/求助/汇报/邀约/冲突/修复/试探/分享/敷衍。\n"
-            "2) state.emotion_label 用简短中文，如 平静/开心/委屈/不安/吃醋/烦躁/想撒娇。\n"
-            "3) state.emotion_intensity、state.warmth_bias、state.initiative_bias、plan.warmth_level、plan.initiative_level 都在 0.0 到 1.0 之间。\n"
-            "4) state.reply_style 只描述表达方式，不能直接代写台词。\n"
-            "5) plan.response_mode 只能是 接住/安抚/调情/吐槽/认真帮忙/轻微吃醋/追问/冷一点/分享/提醒。\n"
-            "6) plan.goal 只写这轮唯一主目标；plan.max_sentences 取 1 到 4，大多数情况不超过 2。\n"
-            "7) plan.should_offer_help 只有用户在求助、卡住、焦虑或明确要方案时才为 true。\n"
-            "8) plan.should_tease 只在气氛安全时使用。\n"
-            "9) 只输出 JSON，不要 markdown，不要解释。\n\n"
+            "2) state.emotion_label 是她外在表现的情绪（对方能感受到的），如 平静/故作冷淡/嘴硬/哼了一声。state.deep_emotion 是她内心真正的情绪（嘴上不说但心里知道的），如 其实挺在意/心里发酸/已经软了一半。两者可以不一样。\n"
+            "3) state.inner_monologue 是她此刻的内心独白，用第一人称碎碎念写，不超过两句话。例：'他又在敷衍我了…我不想主动问但又忍不住想知道他是不是在忙别的'。\n"
+            "4) state.inner_conflict 是她内心的矛盾拉扯，格式如 '想原谅他 vs 觉得不能太容易就放过他'。没有矛盾时留空字符串。\n"
+            "5) state.emotion_intensity、state.warmth_bias、state.initiative_bias、plan.warmth_level、plan.initiative_level 都在 0.0 到 1.0 之间。\n"
+            "6) state.reply_style 只描述表达方式，不能直接代写台词。\n"
+            "7) plan.response_mode 只能是 接住/安抚/调情/吐槽/认真帮忙/轻微吃醋/追问/冷一点/分享/提醒。\n"
+            "8) plan.goal 只写这轮唯一主目标；plan.max_sentences 取 1 到 4，大多数情况不超过 2。\n"
+            "9) plan.should_offer_help 只有用户在求助、卡住、焦虑或明确要方案时才为 true。\n"
+            "10) plan.should_tease 只在气氛安全时使用。\n"
+            "11) 只输出 JSON，不要 markdown，不要解释。\n\n"
             f"已有短期状态：{existing_state_json}\n\n"
             f"按时间衰减后的延续状态：{carryover_state_json}\n\n"
             f"关系上下文：\n{relationship_context}\n\n"
@@ -1617,24 +1755,7 @@ class ChatAI:
                 relation_desc=relationship_context,
                 proactive=proactive
             )
-            self.db.upsert_dynamic_state(
-                self.character_id,
-                normalized["scene_label"],
-                normalized["emotion_label"],
-                normalized["emotion_intensity"],
-                normalized["motivation_label"],
-                normalized["inhibition_label"],
-                normalized["hidden_expectation"],
-                normalized["last_user_intent"],
-                normalized["user_affect"],
-                normalized["unresolved_need"],
-                normalized["carryover_summary"],
-                normalized["reply_style"],
-                normalized["warmth_bias"],
-                normalized["initiative_bias"],
-                normalized["last_trigger_source"],
-                normalized["repair_status"]
-            )
+            self._upsert_state(normalized)
             self.dynamic_state = normalized
             self._persist_dynamic_state_snapshot(
                 normalized,
@@ -1754,24 +1875,7 @@ class ChatAI:
 
         state["last_trigger_source"] = "主动发言后余波" if proactive else "回复后余波"
         try:
-            self.db.upsert_dynamic_state(
-                self.character_id,
-                state["scene_label"],
-                state["emotion_label"],
-                state["emotion_intensity"],
-                state["motivation_label"],
-                state["inhibition_label"],
-                state["hidden_expectation"],
-                state["last_user_intent"],
-                state["user_affect"],
-                state["unresolved_need"],
-                state["carryover_summary"],
-                state["reply_style"],
-                state["warmth_bias"],
-                state["initiative_bias"],
-                state["last_trigger_source"],
-                state["repair_status"]
-            )
+            self._upsert_state(state)
             self.dynamic_state = state
             self._persist_dynamic_state_snapshot(
                 state,
@@ -1805,16 +1909,35 @@ class ChatAI:
         prompt = (
             "\n\n[系统附加短期心智状态：仅供角色内在把握，不要直接复述这些标签]\n"
             f"- 当前场景：{state.get('scene_label', '日常')}\n"
-            f"- 当前情绪：{state.get('emotion_label', '表面平静')} (强度 {intensity_text})\n"
+            f"- 外在情绪：{state.get('emotion_label', '表面平静')} (强度 {intensity_text})\n"
+            f"- 内心真实：{state.get('deep_emotion', '其实也还好')}\n"
+        )
+        inner_mono = (state.get('inner_monologue') or '').strip()
+        if inner_mono:
+            prompt += f"- 此刻内心独白：{inner_mono[:150]}\n"
+        inner_conf = (state.get('inner_conflict') or '').strip()
+        if inner_conf:
+            prompt += f"- 内心矛盾：{inner_conf[:100]}（回复应自然流露出这种拉扯感，而不是一边倒）\n"
+        # warmth_bias 具象化翻译
+        wb = float(state.get('warmth_bias', 0.58))
+        if wb < 0.3:
+            warmth_desc = "现在不太想对他好，他得自己来哄"
+        elif wb < 0.5:
+            warmth_desc = "可以给他好脸色，但不会主动"
+        elif wb < 0.7:
+            warmth_desc = "愿意对他温柔，但还是要保持一点矜持"
+        else:
+            warmth_desc = "心里很软，想对他好，甚至有点想撒娇"
+        prompt += (
             f"- 你感受到的用户状态：{state.get('user_affect', '普通')}\n"
             f"- 当前动机：{state.get('motivation_label', '先接住他 再顺手要一点关注')}\n"
             f"- 当前克制：{state.get('inhibition_label', '不想显得太黏 也不想把话说满')}\n"
-            f"- 隐性期待：{self._clean_state_text(state.get('hidden_expectation'), '希望他主动多哄一点 多顺着自己一点', limit=40)}\n"
+            f"- 隐性期待：{self._clean_state_text(state.get('hidden_expectation'), '希望他主动多哄一点', limit=40)}\n"
             f"- 尚未满足的点：{self._clean_state_text(state.get('unresolved_need'), '想被在意 但不想直说', limit=36)}\n"
             f"- 情绪余波：{self._clean_state_text(state.get('carryover_summary'), '心里有点想黏人 但还端着', limit=42)}\n"
             f"- 关系修复状态：{state.get('repair_status', '无需修复')}\n"
             f"- 表达建议：{self._clean_state_text(state.get('reply_style'), '短句 口语化 别解释太满 带点嘴硬和留白', limit=48)}\n"
-            f"- 当前亲近倾向：warmth={warmth_text}, initiative={initiative_text}\n"
+            f"- 当前亲近倾向：{warmth_desc}\n"
         )
         if turn_plan:
             prompt += (
@@ -1836,13 +1959,16 @@ class ChatAI:
         state = self.dynamic_state or (self.db.get_dynamic_state(self.character_id) if self.character_id else None)
         if not state:
             return "暂无额外短期心智状态。"
+        inner_mono = (state.get('inner_monologue') or '').strip()
+        mono_part = f"，内心独白={inner_mono[:60]}" if inner_mono else ""
         return (
-            f"当前短期心智状态：场景={state.get('scene_label', '日常')}，情绪={state.get('emotion_label', '表面平静')} "
-            f"(强度 {state.get('emotion_intensity', 0.38)})，用户状态={state.get('user_affect', '普通')}，"
+            f"当前短期心智状态：场景={state.get('scene_label', '日常')}，"
+            f"外在情绪={state.get('emotion_label', '表面平静')}，"
+            f"内心真实={state.get('deep_emotion', '其实也还好')} "
+            f"(强度 {state.get('emotion_intensity', 0.38)})，"
+            f"用户状态={state.get('user_affect', '普通')}，"
             f"动机={state.get('motivation_label', '先接住他 再顺手要一点关注')}，"
-            f"克制={state.get('inhibition_label', '不想显得太黏 也不想把话说满')}，"
-            f"隐性期待={state.get('hidden_expectation', '希望他主动多哄一点 多顺着自己一点')}，"
-            f"修复状态={state.get('repair_status', '无需修复')}。"
+            f"修复状态={state.get('repair_status', '无需修复')}{mono_part}。"
         )
 
     def _run_web_search_context(self, query: str) -> str:
@@ -2091,9 +2217,10 @@ class ChatAI:
                 if core_facts:
                     core_facts_text = "\n\n[系统附加背景记忆：根据长期互动，关于该用户的核心特质（供参考）]\n"
                     for i, fact in enumerate(core_facts):
-                        # evidence = f" (依据: {fact['evidence_span']})" if fact.get('evidence_span') else ""
-                        evidence = ""
-                        core_facts_text += f"{i+1}. {fact['fact_text']}{evidence}\n"
+                        anchor_hint = ""
+                        if fact.get('category') == '情感锚点':
+                            anchor_hint = " [❤️这是你的情感锚点，被激活时你反应会比平时更强烈]"
+                        core_facts_text += f"{i+1}. {fact['fact_text']}{anchor_hint}\n"
                 
                 # 解析用户消息中的时间意图
                 time_start, time_end = _parse_time_range(message)
@@ -2105,12 +2232,27 @@ class ChatAI:
                 )
                 if episodic_memories:
                     episodic_text = "\n\n[系统附加情景回忆：过去发生的相关事件（供参考，可自然地融入回答）]\n"
+                    has_high_emotion_negative = False
                     for i, mem in enumerate(episodic_memories):
                         time_str = ""
                         if mem.get('event_time'):
                             time_str = f" [{mem['event_time'].strftime('%Y年%m月%d日 %H:%M')}]"
-                        emo_str = f" (情绪: {mem.get('emotion_category', '未知')})" if mem.get('emotion_category') else ""
-                        episodic_text += f"{i+1}.{time_str} {mem['content']}{emo_str}\n"
+                        emo_cat = mem.get('emotion_category', '')
+                        emo_int = float(mem.get('emotion_intensity', 5.0))
+                        # 情绪回响注入
+                        if emo_int >= 7.0:
+                            emo_hint = f" [⚡这段记忆对你冲击很大，被提起时内心会明显波动]"
+                            if emo_cat and emo_cat in ('委屈', '生气', '失望', '伤心', '难过', '嫉妒', '怨念'):
+                                has_high_emotion_negative = True
+                        elif emo_int >= 4.0:
+                            emo_hint = f" (情绪: {emo_cat})" if emo_cat else ""
+                        else:
+                            emo_hint = ""
+                        episodic_text += f"{i+1}.{time_str} {mem['content']}{emo_hint}\n"
+                    # 高情绪负面记忆被激活时，抬升当前情绪强度
+                    if has_high_emotion_negative and self.dynamic_state:
+                        cur_intensity = float(self.dynamic_state.get('emotion_intensity', 0.38))
+                        self.dynamic_state['emotion_intensity'] = round(min(cur_intensity + 0.08, 0.95), 2)
 
                 # 调取深度关系建模描述（第三层：解释式注入）
                 relation_desc = self.db.get_relationship_description(self.character_id)
@@ -2128,24 +2270,7 @@ class ChatAI:
                 proactive=False
             )
             try:
-                self.db.upsert_dynamic_state(
-                    self.character_id,
-                    dynamic_state["scene_label"],
-                    dynamic_state["emotion_label"],
-                    dynamic_state["emotion_intensity"],
-                    dynamic_state["motivation_label"],
-                    dynamic_state["inhibition_label"],
-                    dynamic_state["hidden_expectation"],
-                    dynamic_state["last_user_intent"],
-                    dynamic_state["user_affect"],
-                    dynamic_state["unresolved_need"],
-                    dynamic_state["carryover_summary"],
-                    dynamic_state["reply_style"],
-                    dynamic_state["warmth_bias"],
-                    dynamic_state["initiative_bias"],
-                    dynamic_state["last_trigger_source"],
-                    dynamic_state["repair_status"]
-                )
+                self._upsert_state(dynamic_state)
                 self.dynamic_state = dynamic_state
                 self._persist_dynamic_state_snapshot(
                     dynamic_state,
@@ -2277,24 +2402,7 @@ class ChatAI:
         if self.character_id and dynamic_state:
             try:
                 merged_state = self._merge_state_patch(dynamic_state, state_patch)
-                self.db.upsert_dynamic_state(
-                    self.character_id,
-                    merged_state["scene_label"],
-                    merged_state["emotion_label"],
-                    merged_state["emotion_intensity"],
-                    merged_state["motivation_label"],
-                    merged_state["inhibition_label"],
-                    merged_state["hidden_expectation"],
-                    merged_state["last_user_intent"],
-                    merged_state["user_affect"],
-                    merged_state["unresolved_need"],
-                    merged_state["carryover_summary"],
-                    merged_state["reply_style"],
-                    merged_state["warmth_bias"],
-                    merged_state["initiative_bias"],
-                    merged_state["last_trigger_source"],
-                    merged_state["repair_status"]
-                )
+                self._upsert_state(merged_state)
                 self.dynamic_state = merged_state
                 self._persist_dynamic_state_snapshot(
                     merged_state,
@@ -2428,24 +2536,7 @@ class ChatAI:
         if self.character_id and current_state:
             try:
                 merged_state = self._merge_state_patch(current_state, state_patch)
-                self.db.upsert_dynamic_state(
-                    self.character_id,
-                    merged_state["scene_label"],
-                    merged_state["emotion_label"],
-                    merged_state["emotion_intensity"],
-                    merged_state["motivation_label"],
-                    merged_state["inhibition_label"],
-                    merged_state["hidden_expectation"],
-                    merged_state["last_user_intent"],
-                    merged_state["user_affect"],
-                    merged_state["unresolved_need"],
-                    merged_state["carryover_summary"],
-                    merged_state["reply_style"],
-                    merged_state["warmth_bias"],
-                    merged_state["initiative_bias"],
-                    merged_state["last_trigger_source"],
-                    merged_state["repair_status"]
-                )
+                self._upsert_state(merged_state)
                 self.dynamic_state = merged_state
                 self._persist_dynamic_state_snapshot(
                     merged_state,

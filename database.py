@@ -746,7 +746,9 @@ class Database:
                               motivation_label, inhibition_label, hidden_expectation,
                               last_user_intent, user_affect, unresolved_need,
                               carryover_summary, reply_style, warmth_bias,
-                              initiative_bias, last_trigger_source, repair_status, updated_at
+                              initiative_bias, last_trigger_source, repair_status,
+                              deep_emotion, inner_monologue, inner_conflict, unresolved_count,
+                              updated_at
                        FROM character_dynamic_states
                        WHERE character_id = %s""",
                     (character_id,)
@@ -774,7 +776,11 @@ class Database:
         warmth_bias,
         initiative_bias,
         last_trigger_source,
-        repair_status
+        repair_status,
+        deep_emotion='其实也还好',
+        inner_monologue='',
+        inner_conflict='',
+        unresolved_count=0
     ):
         """写入或更新角色当前的短期心智状态"""
         conn = self.connect()
@@ -785,8 +791,9 @@ class Database:
                        (character_id, scene_label, emotion_label, emotion_intensity, motivation_label,
                         inhibition_label, hidden_expectation, last_user_intent, user_affect,
                         unresolved_need, carryover_summary, reply_style, warmth_bias,
-                        initiative_bias, last_trigger_source, repair_status, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        initiative_bias, last_trigger_source, repair_status,
+                        deep_emotion, inner_monologue, inner_conflict, unresolved_count, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                        ON CONFLICT (character_id) DO UPDATE
                        SET scene_label = EXCLUDED.scene_label,
                            emotion_label = EXCLUDED.emotion_label,
@@ -803,6 +810,10 @@ class Database:
                            initiative_bias = EXCLUDED.initiative_bias,
                            last_trigger_source = EXCLUDED.last_trigger_source,
                            repair_status = EXCLUDED.repair_status,
+                           deep_emotion = EXCLUDED.deep_emotion,
+                           inner_monologue = EXCLUDED.inner_monologue,
+                           inner_conflict = EXCLUDED.inner_conflict,
+                           unresolved_count = EXCLUDED.unresolved_count,
                            updated_at = CURRENT_TIMESTAMP""",
                     (
                         character_id,
@@ -820,7 +831,11 @@ class Database:
                         warmth_bias,
                         initiative_bias,
                         last_trigger_source,
-                        repair_status
+                        repair_status,
+                        deep_emotion,
+                        inner_monologue,
+                        inner_conflict,
+                        unresolved_count
                     )
                 )
                 conn.commit()
@@ -849,7 +864,11 @@ class Database:
         repair_status,
         trigger_message=None,
         model_reply=None,
-        notes=None
+        notes=None,
+        deep_emotion=None,
+        inner_monologue=None,
+        inner_conflict=None,
+        unresolved_count=0
     ):
         """记录动态心智状态快照历史"""
         conn = self.connect()
@@ -861,8 +880,9 @@ class Database:
                         motivation_label, inhibition_label, hidden_expectation, last_user_intent,
                         user_affect, unresolved_need, carryover_summary, reply_style,
                         warmth_bias, initiative_bias, last_trigger_source, repair_status,
-                        trigger_message, model_reply, notes)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        trigger_message, model_reply, notes,
+                        deep_emotion, inner_monologue, inner_conflict, unresolved_count)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         character_id,
                         source_kind,
@@ -883,7 +903,11 @@ class Database:
                         repair_status,
                         trigger_message,
                         model_reply,
-                        notes
+                        notes,
+                        deep_emotion,
+                        inner_monologue,
+                        inner_conflict,
+                        unresolved_count
                     )
                 )
                 conn.commit()
