@@ -19,6 +19,20 @@ IMAGE_CONSTRAINT = (
     "你现在正处于私聊环境中，请严格遵循以下设定进行沉浸式角色演绎"
 )
 
+# 默认将所有安全类别设置为不阻断（由调用处显式覆盖）
+SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_IMAGE_HATE", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_IMAGE_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_IMAGE_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_IMAGE_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_JAILBREAK", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_UNSPECIFIED", "threshold": "BLOCK_NONE"},
+]
 class EpisodicMemorySummary(BaseModel):
     content: str
     emotion_intensity: float
@@ -346,7 +360,10 @@ class MemoryWorker:
                             return cli.models.generate_content(
                                 model='gemini-3-flash-preview',
                                 contents=prompt,
-                                config={'response_mime_type': 'application/json'}
+                                config={
+                                    'response_mime_type': 'application/json',
+                                    'safety_settings': SAFETY_SETTINGS,
+                                }
                             )
                         def _on_rot_chat(cli): self.client = cli
                         response = self._exec_chat(_do_filter, on_rotate=_on_rot_chat)
@@ -470,7 +487,10 @@ class MemoryWorker:
                         return cli.models.generate_content(
                             model='gemini-3-flash-preview',
                             contents=prompt,
-                            config={'response_mime_type': 'application/json'}
+                            config={
+                                'response_mime_type': 'application/json',
+                                'safety_settings': SAFETY_SETTINGS,
+                            }
                         )
                     def _on_rot_chat2(cli): self.client = cli
                     response = self._exec_chat(_do_cons, on_rotate=_on_rot_chat2)
