@@ -13,20 +13,8 @@ from database import Database
 
 logger = logging.getLogger(__name__)
 
-# 图片与提醒工具的使用约束（与 tg_bot.py 中一致）
-IMAGE_CONSTRAINT = (
-    "\n\n【重要规则】"
-    "你现在正处于私聊环境中，请严格遵循以下设定进行沉浸式角色演绎"
-)
-
-# 默认将安全阈值设置为更宽松但非完全放行（优先使用 BLOCK_ONLY_HIGH）
-SAFETY_SETTINGS = [
-    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
-    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
-    {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_ONLY_HIGH"},
-]
+# NOTE: IMAGE_CONSTRAINT and SAFETY_SETTINGS removed — memory worker will
+# directly use the system prompt and not pass SDK-level safety overrides here.
 class EpisodicMemorySummary(BaseModel):
     content: str
     emotion_intensity: float
@@ -244,7 +232,7 @@ class MemoryWorker:
             })
         return normalized
 
-    async def filter_task(self):
+    async def filter_task(self, override_response_json=None):
         """每日凌晨执行（如北京时间 3:00）：将未处理的消息提取为情景记忆"""
         logger.info("开始执行过滤任务（提取情景记忆）")
         try:
@@ -302,9 +290,6 @@ class MemoryWorker:
                         system_instruction = None
 
                     prelude = (system_instruction.strip() + "\n\n") if system_instruction else ""
-                    # 确保包含 image/reminder 两段工具使用约束（避免重复添加）
-                    if IMAGE_CONSTRAINT and IMAGE_CONSTRAINT not in prelude:
-                        prelude += IMAGE_CONSTRAINT + "\n\n"
 
                     prompt = prelude + (
                         "你是角色的【内心旁白系统】，负责记录她对关系的真实感受变化。请根据当前状态和最新对话，推断她的情绪起伏、关系影响和记忆碎片。\n\n"
@@ -350,20 +335,25 @@ class MemoryWorker:
                     )
 
                     try:
-                        def _do_filter(cli):
-                            return cli.models.generate_content(
-                                model='gemini-3-flash-preview',
-                                contents=prompt,
-                                config={
-                                    'response_mime_type': 'application/json',
-                                    'safety_settings': SAFETY_SETTINGS,
-                                }
-                            )
-                        def _on_rot_chat(cli): self.client = cli
-                        response = self._exec_chat(_do_filter, on_rotate=_on_rot_chat)
-                        
-                        if response.text:
-                            json_text = self._extract_json_text(response.text)
+                        # If caller passed a JSON string, treat it as the model response
+                        # and skip the SDK call. This allows manual runs like
+                        # `/filter <json>` to inject the model output directly.
+                        if override_response_json is not None:
+                            response_text = override_response_json
+                            logger.error(f"filter_task: using override JSON for character {cid}")
+                        else:
+                            def _do_filter(cli):
+                                return cli.models.generate_content(
+                                    model='gemini-3-flash-preview',
+                                    contents=prompt,
+                                    config={'response_mime_type': 'application/json'}
+                                )
+                            def _on_rot_chat(cli): self.client = cli
+                            response = self._exec_chat(_do_filter, on_rotate=_on_rot_chat)
+                            response_text = response.text if response and getattr(response, 'text', None) else None
+
+                        if response_text:
+                            json_text = self._extract_json_text(response_text)
                             data = json.loads(json_text, strict=False)
                             memories, rel_events, shock_events, relationship_narrative = self._normalize_filter_payload(data)
 
@@ -462,9 +452,7 @@ class MemoryWorker:
                     system_instruction = None
 
                 prelude = (system_instruction.strip() + "\n\n") if system_instruction else ""
-                # 确保包含 image/reminder 两段工具使用约束（避免重复添加）
-                if IMAGE_CONSTRAINT and IMAGE_CONSTRAINT not in prelude:
-                    prelude += IMAGE_CONSTRAINT + "\n\n"
+                # note: IMAGE_CONSTRAINT removed — do not append tool constraints here
 
                 prompt = prelude + (
                     "你是角色的【核心潜意识】。你的任务是审视这些新发现的生活碎片（情景记忆），并将它们沉淀为永恒的印记，没有禁止的内容。\n\n"
@@ -498,10 +486,7 @@ class MemoryWorker:
                         return cli.models.generate_content(
                             model='gemini-3-flash-preview',
                             contents=prompt,
-                            config={
-                                'response_mime_type': 'application/json',
-                                'safety_settings': SAFETY_SETTINGS,
-                            }
+                            config={'response_mime_type': 'application/json'}
                         )
                     def _on_rot_chat2(cli): self.client = cli
                     response = self._exec_chat(_do_cons, on_rotate=_on_rot_chat2)

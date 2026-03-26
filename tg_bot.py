@@ -3082,6 +3082,55 @@ async def trigger_consolidate(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"巩固任务执行失败: {str(e)}")
     asyncio.create_task(run_task())
 
+
+async def trigger_filter_json(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /filterJson 命令：将传入的 JSON 字符串直接作为模型返回，跳过 SDK 调用。
+    用法：
+      /filterJson <json>
+      或者回复一条包含 JSON 的消息并发送 /filterJson
+      可选：在开头传入 key index（不影响跳过 SDK，但保持参数兼容性）：/filterJson 2 <json>
+    """
+    import asyncio
+    key_index = None
+    payload = None
+
+    # 如果有参数，可能第一个是 key index
+    if context.args:
+        if len(context.args) >= 2:
+            # 尝试把第一个参数解析为整型 key index
+            try:
+                key_index = int(context.args[0])
+                payload = " ".join(context.args[1:])
+            except ValueError:
+                # 第一个不是 index，整个 args 都当作 JSON 内容
+                payload = " ".join(context.args)
+        else:
+            # 只有一个参数，作为 JSON 内容
+            payload = context.args[0]
+
+    # 如果没有附加参数，尝试使用回复的消息内容
+    if not payload and update.message and update.message.reply_to_message and update.message.reply_to_message.text:
+        payload = update.message.reply_to_message.text
+
+    if not payload:
+        await update.message.reply_text("请提供要注入的 JSON 字符串，或回复一条包含 JSON 的消息并发送 /filterJson")
+        return
+
+    key_hint = f"（使用 key index {key_index}）" if key_index is not None else ""
+    await update.message.reply_text(f"已触发过滤任务 (filter_task) 使用注入 JSON {key_hint}，正在后台执行...")
+
+    async def run_task():
+        try:
+            from memory_worker import MemoryWorker
+            worker = MemoryWorker(key_index=key_index)
+            await worker.filter_task(override_response_json=payload)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="过滤任务 (filter_task) 执行完成！")
+        except Exception as e:
+            logger.error(f"手动触发过滤任务（JSON 注入）失败: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"过滤任务执行失败: {str(e)}")
+
+    asyncio.create_task(run_task())
+
 async def trigger_hourly_care_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /care_extract 命令，手动触发整点关怀提取逻辑"""
     import asyncio
@@ -3490,6 +3539,7 @@ def main():
     application.add_handler(CommandHandler("history", history))
     application.add_handler(CommandHandler("del", delete_from_last_user))
     application.add_handler(CommandHandler("filter", trigger_filter))
+    application.add_handler(CommandHandler("filterJson", trigger_filter_json))
     application.add_handler(CommandHandler("consolidate", trigger_consolidate))
     application.add_handler(CommandHandler("care_extract", trigger_hourly_care_extract))
     application.add_handler(CommandHandler("rebuild_cache", trigger_rebuild_cache))
