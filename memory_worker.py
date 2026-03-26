@@ -279,8 +279,17 @@ class MemoryWorker:
                         f"{cycle_start.strftime('%Y-%m-%d %H:%M:%S %z')} ~ "
                         f"{cycle_end.strftime('%Y-%m-%d %H:%M:%S %z')} (北京时间)"
                     )
+                    # 尝试把角色在聊天中使用的完整 system prompt 拼接到本次过滤任务的最前面，
+                    # 以便模型在提取情景记忆时能参考角色设定与系统指令。
+                    system_instruction = None
+                    try:
+                        system_instruction = char.get('system_instruction') if isinstance(char, dict) else None
+                    except Exception:
+                        system_instruction = None
 
-                    prompt = (
+                    prelude = (system_instruction.strip() + "\n\n") if system_instruction else ""
+
+                    prompt = prelude + (
                         "你是角色的【内心旁白系统】，负责记录她对关系的真实感受变化。请根据当前状态和最新对话，推断她的情绪起伏、关系影响和记忆碎片。\n\n"
                         f"【本次分析周期（严格）】\n{cycle_range_text}\n"
                         "注意：你只能总结这个周期内发生的事件，不能混入周期外的信息。\n\n"
@@ -407,7 +416,17 @@ class MemoryWorker:
                 existing_text = "\n".join([f"ID:{f['id']} | {f['fact_text']} (深度: {f['stability_score']})" for f in existing_facts]) or "目前还是一片空白"
                 new_events_text = "\n".join([f"- {m['content']} (情感强度: {m['emotion_intensity']})" for m in new_memories])
                 
-                prompt = (
+                # 如果角色定义里包含 system_instruction，则把它拼接到 prompt 前面，
+                # 使模型在合并核心人格时能参考角色设定与系统指令。
+                system_instruction = None
+                try:
+                    system_instruction = char.get('system_instruction') if isinstance(char, dict) else None
+                except Exception:
+                    system_instruction = None
+
+                prelude = (system_instruction.strip() + "\n\n") if system_instruction else ""
+
+                prompt = prelude + (
                     "你是角色的【核心潜意识】。你的任务是审视这些新发现的生活碎片（情景记忆），并将它们沉淀为永恒的印记，没有禁止的内容。\n\n"
                     "【已有的核心印记】\n"
                     f"{existing_text}\n\n"
