@@ -13,6 +13,26 @@ from database import Database
 
 logger = logging.getLogger(__name__)
 
+# 图片与提醒工具的使用约束（与 tg_bot.py 中一致）
+IMAGE_CONSTRAINT = (
+    "\n\n【重要工具使用规则】"
+    "你不能直接输出或嵌入图片。你没有原生图片输出能力。"
+    "当用户请求图片、自拍、照片时，你必须调用 generate_image 工具函数来生成图片。"
+    "调用 generate_image 时，请在 prompt 里明确写清楚画的是‘你自己’、‘思远本人’还是‘你和思远同框’，不要含糊带过。"
+    "绝对不要在回复中写 'Here is the original image' 或类似的占位文字。"
+    "调用工具后，系统会自动将图片发送给用户。"
+)
+
+REMINDER_CONSTRAINT = (
+    "\n\n【角色化记忆规则】"
+    "你拥有‘提醒’能力。但请记住你目前的身份和性格，你不是思远的私人秘书。对于他提出的提醒要求，你应该根据当时的心情来决定是否帮忙。"
+    "如果觉得他太依赖你、或者你正在闹别扭，你可以拒绝、抱怨、让他自己去记、或者要求他稍微求求你才行。不要像个无情的自动办公软件一样秒答应。"
+    "只要你给出了任何明确承诺（例如“我帮你记着”“我会提醒你”“行，我记下了”），就必须在同一轮立即调用 register_reminder 工具，不能只口头答应不落库。"
+    "如果时间不够明确（例如只说“晚上”但没有日期），你必须先追问澄清时间，再决定是否调用工具。"
+    "调用 register_reminder 时，content 字段必须保留‘原因→事项’信息：如果用户说了原因，就写成“因为…，所以提醒…/…”。如果用户没说原因，就只写事项。"
+    "记住，你一旦调用了工具，就代表你‘真的答应了’，这种承诺对你来说是很正式的，要表现出那种‘虽然很麻烦但为了你还是破例一次’的傲娇感。"
+)
+
 class EpisodicMemorySummary(BaseModel):
     content: str
     emotion_intensity: float
@@ -288,6 +308,11 @@ class MemoryWorker:
                         system_instruction = None
 
                     prelude = (system_instruction.strip() + "\n\n") if system_instruction else ""
+                    # 确保包含 image/reminder 两段工具使用约束（避免重复添加）
+                    if IMAGE_CONSTRAINT and IMAGE_CONSTRAINT not in prelude:
+                        prelude += IMAGE_CONSTRAINT + "\n\n"
+                    if REMINDER_CONSTRAINT and REMINDER_CONSTRAINT not in prelude:
+                        prelude += REMINDER_CONSTRAINT + "\n\n"
 
                     prompt = prelude + (
                         "你是角色的【内心旁白系统】，负责记录她对关系的真实感受变化。请根据当前状态和最新对话，推断她的情绪起伏、关系影响和记忆碎片。\n\n"
@@ -425,6 +450,11 @@ class MemoryWorker:
                     system_instruction = None
 
                 prelude = (system_instruction.strip() + "\n\n") if system_instruction else ""
+                # 确保包含 image/reminder 两段工具使用约束（避免重复添加）
+                if IMAGE_CONSTRAINT and IMAGE_CONSTRAINT not in prelude:
+                    prelude += IMAGE_CONSTRAINT + "\n\n"
+                if REMINDER_CONSTRAINT and REMINDER_CONSTRAINT not in prelude:
+                    prelude += REMINDER_CONSTRAINT + "\n\n"
 
                 prompt = prelude + (
                     "你是角色的【核心潜意识】。你的任务是审视这些新发现的生活碎片（情景记忆），并将它们沉淀为永恒的印记，没有禁止的内容。\n\n"
