@@ -100,10 +100,13 @@ class KeyRouter:
                 # APIError in google.genai has .code
                 is_quota_or_auth = False
                 if isinstance(e, APIError):
-                    if e.code in (400, 403, 429, 500, 502, 503):
+                    # Treat transient/quota/auth errors as retryable. Do NOT treat
+                    # HTTP 400 (invalid-argument) as retryable by default, because
+                    # it usually indicates a bad request that rotating keys won't fix.
+                    if e.code in (403, 429, 500, 502, 503):
                         is_quota_or_auth = True
-                    # Also fallback on 'Resource has been exhausted (e.g. check quota)'
-                    if 'quota' in str(e).lower() or 'exhausted' in str(e).lower() or 'invalid' in str(e).lower():
+                    # Also treat explicit quota/exhaustion messages as retryable.
+                    if 'quota' in str(e).lower() or 'exhausted' in str(e).lower():
                         is_quota_or_auth = True
                 elif '429' in str(e) or '403' in str(e) or 'exhausted' in str(e).lower():
                     is_quota_or_auth = True
