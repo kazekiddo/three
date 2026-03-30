@@ -2231,7 +2231,14 @@ class ChatAI:
                     time_start=time_start, time_end=time_end
                 )
                 if episodic_memories:
-                    episodic_text = "\n\n[系统附加情景回忆：过去发生的相关事件（供参考，可自然地融入回答）]\n"
+                    episodic_text = (
+                        "\n\n[系统附加情景回忆：以下记录的事件都是【已经发生/已经完成】的过往经历]\n"
+                        "⚠️ 严格规则：\n"
+                        "1. 这些事件已经发生过了，不要把它们当作接下来要做的事情再次提议或要求。\n"
+                        "   例如：记忆里说「昨天买了蛋挞」→ ✅可以说「昨天的蛋挞好吃吗」 ❌不能说「我们去买蛋挞吧」\n"
+                        "2. 你可以自然地引用这些过往经历来表达关心、回忆或延续话题，但不要重复安排已经做过的事。\n"
+                        "3. 如果用户当前话题和这些过往记忆无关，就不要刻意提起。\n"
+                    )
                     has_high_emotion_negative = False
                     for i, mem in enumerate(episodic_memories):
                         time_str = ""
