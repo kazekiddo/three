@@ -50,6 +50,87 @@ SUPPORTED_CHAT_MODELS = [
     "gemini-3.5-flash",
 ]
 
+# 全局天气内存缓存
+weather_memory = {
+    "weather_description": None,
+    "clothing_chinese": None,
+    "clothing_english": None,
+    "updated_at": None
+}
+
+async def update_weather_memory():
+    """联网查询成都天气并更新内存"""
+    logger.error("正在通过联网搜索查询成都天气状况...")
+    try:
+        client = chat_router.get_client()
+        now_dt = datetime.datetime.now()
+        current_date_str = now_dt.strftime("%Y-%m-%d")
+        current_time_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        
+        prompt = (
+            f"请通过搜索，获取今天（{current_date_str}）成都市的最新天气状况（温度、天气现象如晴/雨/雪/阴/多云）。\n"
+            "然后根据该天气状况，为角色设计一套适合今天穿的衣服（需要考虑温度和天气，并且符合日系卡通风格画作的穿衣搭配）。\n"
+            "输出必须为以下 JSON 格式（不要使用 markdown 代码块包裹，直接输出 JSON 字符串）：\n"
+            "{\n"
+            '  "weather_description": "今日成都天气情况简述，例如：成都今日阴天，18℃-25℃，有微风",\n'
+            '  "clothing_chinese": "适合今天天气穿的衣服中文描述，例如：一件白色的薄开衫外套，里面穿浅色T恤，搭配牛仔裤和休闲鞋",\n'
+            '  "clothing_english": "适合今天天气穿的衣服英文描述，直接以 \'wearing a ...\' 或 \'wearing ...\' 开头描述服装，不要包含任何风格、艺术效果或角色的其它视觉词（如 Japanese anime style、beautiful face、long hair 等），直接专注于服装本身，以便直接用于生图 prompt"\n'
+            "}\n"
+            f"当前系统时间（Asia/Shanghai）：{current_time_str}。"
+        )
+        
+        def _do_search(cli):
+            model = os.getenv("DEFAULT_CHAT_MODEL", "gemini-3.5-flash")
+            return cli.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.3,
+                    response_mime_type="application/json",
+                    tools=[types.Tool(google_search=types.GoogleSearch())]
+                )
+            )
+            
+        response = chat_router.execute_with_retry(_do_search)
+        text = response.text.strip()
+        
+        if text.startswith("```"):
+            lines = text.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines[-1].startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+            
+        data = json.loads(text)
+        weather_description = data.get("weather_description")
+        clothing_chinese = data.get("clothing_chinese")
+        clothing_english = data.get("clothing_english")
+        
+        if weather_description and clothing_chinese and clothing_english:
+            weather_memory["weather_description"] = weather_description
+            weather_memory["clothing_chinese"] = clothing_chinese
+            weather_memory["clothing_english"] = clothing_english
+            weather_memory["updated_at"] = now_dt
+            logger.error(f"内存天气数据更新成功: {weather_description}, 建议着装: {clothing_chinese}")
+            return True
+        else:
+            logger.error(f"提取的天气字段不完整: {text}")
+    except Exception as e:
+        logger.error(f"更新内存天气数据失败: {e}")
+    return False
+
+async def ensure_weather_memory():
+    """确保内存中有当天的天气数据。如果没有，或者数据已过期，则立即查询一次"""
+    now = datetime.datetime.now()
+    is_valid = False
+    if weather_memory.get("updated_at") and weather_memory.get("weather_description"):
+        if weather_memory["updated_at"].date() == now.date():
+            is_valid = True
+            
+    if not is_valid:
+        await update_weather_memory()
+
 def _parse_time_range(message):
     """从用户消息中解析时间范围关键词，返回 (time_start, time_end) 或 (None, None)"""
     now = datetime.datetime.now()
@@ -380,6 +461,30 @@ class ChatAI:
             base_scene = (prompt_text or "").strip()
             if not base_scene:
                 base_scene = "A high quality Japanese anime illustration."
+
+            # 检测 prompt_text 中是否已包含服装关键词
+            clothing_keywords = [
+                "wear", "wearing", "dress", "dressed", "clothes", "outfit", "suit", "jacket", "shirt", "coat",
+                "穿", "衣服", "服装", "裙", "裤", "衫", "套", "衣", "戴", "背心", "外套", "制服"
+            ]
+            has_explicit_clothing = any(k in base_scene.lower() for k in clothing_keywords)
+
+            # 获取最新的天气穿衣建议
+            weather_clothing_prompt = ""
+            if (subject_mode in ("character_only", "both")) and not has_explicit_clothing:
+                global weather_memory
+                if weather_memory.get("clothing_english"):
+                    clothing_en = weather_memory['clothing_english'].strip()
+                    # 移除开头可能包含的风格、主语、或 gerund 前缀以防冗余
+                    clothing_en = re.sub(r'^(japanese anime style,\s*)', '', clothing_en, flags=re.IGNORECASE)
+                    clothing_en = re.sub(r'^(the girl is\s+|she is\s+|wearing\s+)', '', clothing_en, flags=re.IGNORECASE)
+                    weather_clothing_prompt = f"the girl is wearing {clothing_en}"
+
+            if weather_clothing_prompt:
+                # 智能拼接，如果 base_scene 以句号结尾，保留之
+                if base_scene.endswith(".") or base_scene.endswith("。"):
+                    base_scene = base_scene.rstrip(" .。")
+                base_scene = f"{base_scene}, {weather_clothing_prompt}."
 
             if subject_mode == "character_only":
                 identity_block = (
@@ -2288,6 +2393,20 @@ class ChatAI:
             except Exception as e:
                 logger.error(f"写入本地预修正状态失败: {e}")
 
+        # 检查并尝试后台更新天气内存（如果已过期）
+        now = datetime.datetime.now()
+        is_valid = False
+        global weather_memory
+        if weather_memory.get("updated_at") and weather_memory.get("weather_description"):
+            if weather_memory["updated_at"].date() == now.date():
+                is_valid = True
+        if not is_valid:
+            import asyncio
+            try:
+                asyncio.create_task(update_weather_memory())
+            except Exception:
+                pass
+
         # 拼接最终提交给 LLM 的增强上下文：
         # 1. 临时系统时间锚点 (决定了流逝感)
         # 2. 原始消息
@@ -2295,6 +2414,15 @@ class ChatAI:
         augmented_message = ""
         if context_prefix:
             augmented_message += f"{context_prefix}\n"
+
+        # 注入天气感知提示
+        if weather_memory.get("weather_description") and weather_memory.get("clothing_chinese"):
+            augmented_message += (
+                f"[系统当前天气感知]\n"
+                f"当前成都天气状况：{weather_memory['weather_description']}\n"
+                f"如果你本轮需要生成关于你自己的图片，你的着装应该符合今天的天气状况：{weather_memory['clothing_chinese']}\n\n"
+            )
+
         augmented_message += message
         if core_facts_text:
             augmented_message += core_facts_text
@@ -2476,6 +2604,27 @@ class ChatAI:
                 "\n[系统补充]\n"
                 "现在是上午，请你以角色身份叫他起床，"
             )
+        # 检查并尝试后台更新天气内存（如果已过期）
+        now = datetime.datetime.now()
+        is_valid = False
+        global weather_memory
+        if weather_memory.get("updated_at") and weather_memory.get("weather_description"):
+            if weather_memory["updated_at"].date() == now.date():
+                is_valid = True
+        if not is_valid:
+            import asyncio
+            try:
+                asyncio.create_task(update_weather_memory())
+            except Exception:
+                pass
+
+        if weather_memory.get("weather_description") and weather_memory.get("clothing_chinese"):
+            trigger_msg += (
+                f"\n[系统当前天气感知]\n"
+                f"当前成都天气状况：{weather_memory['weather_description']}\n"
+                f"如果你本轮需要生成关于你自己的图片，你的着装应该符合今天的天气状况：{weather_memory['clothing_chinese']}\n"
+            )
+
         if dynamic_state_prompt:
             trigger_msg += dynamic_state_prompt
         # 统一主动消息的输出协议，便于解析 reply/state_patch
@@ -3316,6 +3465,12 @@ def evaluate_proactive_intent(chat_ai, user_silence_seconds: float, total_silenc
         return False, ""
 
 
+async def weather_check_job(context: ContextTypes.DEFAULT_TYPE):
+    """每天定时执行天气更新"""
+    logger.error("开始执行每日定时天气更新任务...")
+    await update_weather_memory()
+
+
 async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
     """每分钟扫描一次提醒任务，并触发提醒消息"""
     import asyncio
@@ -3506,8 +3661,12 @@ async def post_init(application: Application):
                 character_id=char['id']
             )
             logger.error(f"[post_init] 已自动恢复角色 '{char['name']}' 的聊天实例")
+
+        # 启动时执行一次天气自检更新，不阻塞启动
+        import asyncio
+        asyncio.create_task(ensure_weather_memory())
     except Exception as e:
-        logger.error(f"[post_init] 自动恢复聊天实例失败: {e}")
+        logger.error(f"[post_init] 自动恢复聊天实例或启动天气查询失败: {e}")
     finally:
         db.close()
 
@@ -3595,6 +3754,10 @@ def main():
     filter_time = datetime.time(hour=19, minute=0, second=0, tzinfo=datetime.timezone.utc)
     job_queue.run_daily(memory_filter_job, time=filter_time)
     job_queue.run_daily(clear_chat_history_job, time=filter_time)
+
+    # 每天早上 7:30（北京时间 UTC+8）执行一次天气和穿衣建议内存更新。UTC 23:30 是北京时间 07:30
+    weather_time = datetime.time(hour=23, minute=30, second=0, tzinfo=datetime.timezone.utc)
+    job_queue.run_daily(weather_check_job, time=weather_time)
 
     # 每天凌晨四点（北京时间 UTC+8）执行一次巩固。UTC 20:00 是北京时间 04:00
     consolidate_time = datetime.time(hour=20, minute=0, second=0, tzinfo=datetime.timezone.utc)
