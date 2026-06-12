@@ -69,7 +69,7 @@ class HelperAI:
 
         # 按照官网最新文档：设置 response_modalities 为 ['TEXT', 'IMAGE']
         self.chat = self.client.chats.create(
-            model='gemini-3.1-flash-image-preview',
+            model='gemini-3.1-flash-image',
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 response_modalities=['TEXT', 'IMAGE'],
@@ -93,7 +93,7 @@ class HelperAI:
             self.client = cli
             history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else getattr(self.chat, "history", [])
             self.chat = self.client.chats.create(
-                model='gemini-3.1-flash-image-preview',
+                model='gemini-3.1-flash-image',
                 config=types.GenerateContentConfig(
                     system_instruction=self.system_instruction,
                     response_modalities=['TEXT', 'IMAGE'],

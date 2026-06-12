@@ -344,7 +344,7 @@ class MemoryWorker:
                         else:
                             def _do_filter(cli):
                                 return cli.models.generate_content(
-                                    model='gemini-3-flash-preview',
+                                    model='gemini-3.5-flash',
                                     contents=prompt,
                                     config={'response_mime_type': 'application/json'}
                                 )
@@ -484,7 +484,7 @@ class MemoryWorker:
                 try:
                     def _do_cons(cli):
                         return cli.models.generate_content(
-                            model='gemini-3-flash-preview',
+                            model='gemini-3.5-flash',
                             contents=prompt,
                             config={'response_mime_type': 'application/json'}
                         )

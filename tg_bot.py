@@ -45,9 +45,9 @@ async def _send_with_retry(coro_factory, label: str, retries: int = 2, base_dela
 MEDIA_DIR = os.path.join(os.getcwd(), 'media', 'photos')
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
-DEFAULT_CHAT_MODEL = "gemini-3-flash-preview"
+DEFAULT_CHAT_MODEL = "gemini-3.5-flash"
 SUPPORTED_CHAT_MODELS = [
-    "gemini-3-flash-preview",
+    "gemini-3.5-flash",
 ]
 
 def _parse_time_range(message):
@@ -496,10 +496,10 @@ class ChatAI:
                     except Exception as e:
                         logger.error(f"加载用户设定图失败: {e}")
 
-                # 调用 gemini-3.1-flash-image-preview 生成图片，暂不设置不支持的 image_size
+                # 调用 gemini-3.1-flash-image 生成图片，暂不设置不支持的 image_size
                 def _do_gen_image(cli):
                     return cli.models.generate_content(
-                        model='gemini-3.1-flash-image-preview',
+                        model='gemini-3.1-flash-image',
                         contents=generation_contents,
                         config=types.GenerateContentConfig(
                             image_config=types.ImageConfig(
