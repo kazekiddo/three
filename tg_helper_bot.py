@@ -417,22 +417,32 @@ async def end_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("没有正在运行的 AI 会话。")
 
-async def kline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    debug_log(f"收到 /kline: text={update.message.text if update.message else None}, args={context.args}")
-    if not await check_auth(update): return
+def parse_kline_args_from_text(text):
+    if not text:
+        return []
+    parts = text.strip().split()
+    if not parts:
+        return []
 
+    command = parts[0].lstrip("/／").split("@", 1)[0].lower()
+    if command != "kline":
+        return []
+    return parts[1:]
+
+
+async def run_kline(update: Update, symbol_key):
     user_id = update.effective_user.id
     if user_id not in ai_sessions:
         debug_log(f"/kline 被拒绝，AI会话不存在: user_id={user_id}")
         await update.message.reply_text("请先使用 /ai 开始 AI 会话，再使用 /kline btc 或 /kline eth。")
         return
 
-    if not context.args:
+    if not symbol_key:
         debug_log("/kline 缺少参数")
         await update.message.reply_text("用法：/kline btc 或 /kline eth")
         return
 
-    symbol_key = context.args[0].lower()
+    symbol_key = symbol_key.lower()
     symbol = KLINE_SYMBOLS.get(symbol_key)
     if not symbol:
         debug_log(f"/kline 参数不支持: arg={symbol_key}")
@@ -453,6 +463,22 @@ async def kline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         debug_log(f"K线数据发送出错: user_id={user_id}, symbol={symbol}, error={e}", e)
         await update.message.reply_text(f"K线数据发送失败: {str(e)}")
+
+async def kline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log(f"收到 /kline CommandHandler: text={update.message.text if update.message else None}, args={context.args}")
+    if not await check_auth(update): return
+
+    symbol_key = context.args[0] if context.args else None
+    await run_kline(update, symbol_key)
+
+async def kline_message_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text if update.message else ""
+    args = parse_kline_args_from_text(text)
+    debug_log(f"收到 /kline fallback: text={text}, args={args}")
+    if not await check_auth(update): return
+
+    symbol_key = args[0] if args else None
+    await run_kline(update, symbol_key)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     debug_log("收到 /help")
@@ -584,6 +610,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_error_handler(error_handler)
     
+    application.add_handler(MessageHandler(filters.Regex(r"^[/／]kline(?:@\w+)?(?:\s|$)"), kline_message_fallback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
