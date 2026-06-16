@@ -2,6 +2,7 @@ import os
 import logging
 import io
 import datetime
+import traceback
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from PIL import Image
@@ -91,6 +92,14 @@ user_sessions = {}
 ai_sessions = {}
 
 
+def debug_log(message, exc=None):
+    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+    print(f"[tg_helper_bot][{timestamp}] {message}", flush=True)
+    logger.error(message)
+    if exc is not None:
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+
 async def reply_text_chunks(update: Update, text: str):
     """Telegram 单条消息有长度限制，长回复分段发送。"""
     if not text:
@@ -103,11 +112,14 @@ async def reply_text_chunks(update: Update, text: str):
 def get_two_database_url():
     database_url = os.getenv("TWO_DATABASE_URL")
     if not database_url:
+        debug_log("TWO_DATABASE_URL 未配置")
         raise ValueError("请设置 TWO_DATABASE_URL 环境变量")
+    debug_log("TWO_DATABASE_URL 已读取")
     return database_url
 
 
 def fetch_kline_rows(symbol, interval_name, days=None, limit=None):
+    debug_log(f"开始查询K线: symbol={symbol}, interval={interval_name}, days={days}, limit={limit}")
     database_url = get_two_database_url()
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -124,7 +136,9 @@ def fetch_kline_rows(symbol, interval_name, days=None, limit=None):
                     """,
                     (symbol, interval_name, days),
                 )
-                return cur.fetchall()
+                rows = cur.fetchall()
+                debug_log(f"K线查询完成: symbol={symbol}, interval={interval_name}, rows={len(rows)}")
+                return rows
 
             cur.execute(
                 """
@@ -143,7 +157,9 @@ def fetch_kline_rows(symbol, interval_name, days=None, limit=None):
                 """,
                 (symbol, interval_name, limit),
             )
-            return cur.fetchall()
+            rows = cur.fetchall()
+            debug_log(f"K线查询完成: symbol={symbol}, interval={interval_name}, rows={len(rows)}")
+            return rows
 
 
 def format_decimal(value):
@@ -158,6 +174,7 @@ def format_kline_time(value):
 
 
 def build_kline_prompt(symbol):
+    debug_log(f"开始组装K线prompt: symbol={symbol}")
     sections = []
     counts = {}
 
@@ -179,6 +196,7 @@ def build_kline_prompt(symbol):
         "字段: open_time,open,high,low,close,volume\n\n"
         + "\n\n".join(sections)
     )
+    debug_log(f"K线prompt组装完成: symbol={symbol}, counts={counts}, chars={len(prompt)}")
     return prompt, counts
 
 
@@ -300,6 +318,7 @@ class HelperAI:
 
 class HelperTextAI:
     def __init__(self, system_instruction=AI_SYSTEM_PROMPT):
+        debug_log(f"开始创建文字AI会话: model={AI_CHAT_MODEL}")
         self.client = chat_router.get_client()
         self.system_instruction = system_instruction
         self.chat = self.client.chats.create(
@@ -308,12 +327,15 @@ class HelperTextAI:
                 system_instruction=system_instruction
             )
         )
+        debug_log("文字AI会话创建完成")
 
     async def chat_text(self, prompt):
         """调用 Gemini 文字聊天并保留本次 /ai 会话上下文。"""
+        debug_log(f"准备发送文字AI消息: chars={len(prompt)}")
         def _do_chat_send(cli):
             self.client = cli
             history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else getattr(self.chat, "history", [])
+            debug_log(f"重建文字AI chat: history_items={len(history)}")
             self.chat = self.client.chats.create(
                 model=AI_CHAT_MODEL,
                 config=types.GenerateContentConfig(
@@ -324,11 +346,15 @@ class HelperTextAI:
             return self.chat.send_message(prompt)
 
         response = chat_router.execute_with_retry(_do_chat_send)
+        debug_log(f"文字AI返回完成: text_chars={len(response.text or '')}")
         return response.text or ""
 
 async def check_auth(update: Update):
+    user_id = update.effective_user.id if update.effective_user else None
+    debug_log(f"鉴权检查: user_id={user_id}")
     if update.effective_user.id != ALLOWED_USER_ID:
         await update.message.reply_text("Unauthorized.")
+        debug_log(f"鉴权失败: user_id={user_id}")
         return False
     return True
 
@@ -365,17 +391,23 @@ async def end_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("没有正在运行的生图会话。")
 
 async def start_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log(f"收到 /ai: chat_id={update.effective_chat.id if update.effective_chat else None}")
     if not await check_auth(update): return
 
     user_id = update.effective_user.id
     try:
+        await update.message.reply_text("正在启动 AI 会话...")
+        debug_log(f"开始启动AI会话: user_id={user_id}")
         user_sessions.pop(user_id, None)
         ai_sessions[user_id] = HelperTextAI()
+        debug_log(f"AI会话已写入内存: user_id={user_id}, active_ai_sessions={len(ai_sessions)}")
         await update.message.reply_text("AI 会话已启动。现在可以直接聊天，输入 /aiend 结束。")
     except Exception as e:
+        debug_log(f"AI 会话启动失败: user_id={user_id}, error={e}", e)
         await update.message.reply_text(f"AI 会话启动失败: {str(e)}")
 
 async def end_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log(f"收到 /aiend: chat_id={update.effective_chat.id if update.effective_chat else None}")
     if not await check_auth(update): return
 
     user_id = update.effective_user.id
@@ -386,35 +418,44 @@ async def end_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("没有正在运行的 AI 会话。")
 
 async def kline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log(f"收到 /kline: text={update.message.text if update.message else None}, args={context.args}")
     if not await check_auth(update): return
 
     user_id = update.effective_user.id
     if user_id not in ai_sessions:
+        debug_log(f"/kline 被拒绝，AI会话不存在: user_id={user_id}")
         await update.message.reply_text("请先使用 /ai 开始 AI 会话，再使用 /kline btc 或 /kline eth。")
         return
 
     if not context.args:
+        debug_log("/kline 缺少参数")
         await update.message.reply_text("用法：/kline btc 或 /kline eth")
         return
 
     symbol_key = context.args[0].lower()
     symbol = KLINE_SYMBOLS.get(symbol_key)
     if not symbol:
+        debug_log(f"/kline 参数不支持: arg={symbol_key}")
         await update.message.reply_text("只支持 /kline btc 或 /kline eth。")
         return
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await update.message.reply_text(f"开始读取并发送数据 {symbol}...")
 
     try:
+        debug_log(f"/kline 开始处理: user_id={user_id}, symbol={symbol}")
         prompt, counts = build_kline_prompt(symbol)
-        logger.error(f"K线数据已组装: {symbol} {counts}")
+        debug_log(f"K线数据已组装: {symbol} {counts}")
+        await update.message.reply_text(f"K线数据已读取 {symbol}: 4h={counts.get('4h', 0)}, 1h={counts.get('1h', 0)}, 15m={counts.get('15m', 0)}, 1m={counts.get('1m', 0)}。正在发送给 AI...")
         await ai_sessions[user_id].chat_text(prompt)
+        debug_log(f"/kline 已发送给AI: user_id={user_id}, symbol={symbol}")
         await update.message.reply_text(f"已发送数据 {symbol}")
     except Exception as e:
-        logger.error(f"K线数据发送出错: {e}")
+        debug_log(f"K线数据发送出错: user_id={user_id}, symbol={symbol}, error={e}", e)
         await update.message.reply_text(f"K线数据发送失败: {str(e)}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log("收到 /help")
     if not await check_auth(update): return
     help_text = (
         "🤖 <b>Helper Bot 命令列表</b>\n\n"
@@ -434,6 +475,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='HTML')
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log("收到图片消息")
     if not await check_auth(update): return
     user_id = update.effective_user.id
 
@@ -470,6 +512,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("已收到图片。请发送文字描述以生成新图。")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log(f"收到普通消息: text={update.message.text if update.message else None}")
     if not await check_auth(update): return
     user_id = update.effective_user.id
 
@@ -484,7 +527,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text("AI 没有返回内容，请再试一次。")
         except Exception as e:
-            logger.error(f"AI 聊天出错: {e}")
+            debug_log(f"AI 聊天出错: user_id={user_id}, error={e}", e)
             await update.message.reply_text(f"出错啦: {str(e)}")
         return
     
@@ -509,14 +552,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("未能生成图片，请换个描述试试。")
             
     except Exception as e:
-        logger.error(f"生图出错: {e}")
+        debug_log(f"生图出错: user_id={user_id}, error={e}", e)
         await update.message.reply_text(f"出错啦: {str(e)}")
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    debug_log(f"Telegram handler 未捕获异常: update={update}, error={context.error}", context.error)
 
 def main():
     token = os.getenv('TELEGRAM_HELPER_BOT_TOKEN')
     if not token:
         print("错误：请设置 TELEGRAM_HELPER_BOT_TOKEN")
         return
+
+    debug_log(
+        "Helper Bot 准备启动: "
+        f"token_configured={bool(token)}, "
+        f"TWO_DATABASE_URL_configured={bool(os.getenv('TWO_DATABASE_URL'))}, "
+        f"AI_CHAT_MODEL={AI_CHAT_MODEL}"
+    )
 
     application = Application.builder().token(token).build()
 
@@ -529,11 +582,12 @@ def main():
     application.add_handler(CommandHandler("aiend", end_ai))
     application.add_handler(CommandHandler("end", end_gen))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_error_handler(error_handler)
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    print("Helper Bot 已启动")
+    print("Helper Bot 已启动", flush=True)
     application.run_polling()
 
 if __name__ == "__main__":
