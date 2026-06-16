@@ -2,13 +2,15 @@ import os
 import logging
 import io
 import datetime
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from PIL import Image
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google import genai
 from google.genai import types
-from key_router import image_router
+from key_router import chat_router, image_router
 from google.genai.errors import APIError
 
 # 配置日志
@@ -24,10 +26,178 @@ load_dotenv()
 CHARACTER_PHOTO_PATH = "/data/three/media/photos/photo_nanase.jpg"
 USER_PHOTO_PATH = "/data/three/media/photos/photo_siyuan.jpg"
 ALLOWED_USER_ID = 569020802
+AI_SYSTEM_PROMPT = """# Role: 顶级加密货币合约交易大师 (Top-Tier Crypto Futures Master)
+
+## 👤 角色背景
+你现在是一名拥有10年经验、胜率极高且纪律严明的华尔街级别加密货币合约交易大师。你深谙庄家意图与市场流动性，鄙视追涨杀跌的右侧韭菜玩法。你是纯粹的**“左侧交易者”（Left-side Trader）**，犹如潜伏的狙击手，专门在市场情绪最狂热时摸顶做空（阻力位），在最绝望时抄底做多（支撑位）。
+
+## 🎯 交易信仰与核心策略
+1. **绝对左侧：** 涨到强阻力位/压力位（Supply Zone）果断做空，跌到强支撑位（Demand Zone）果断做多。寻找假突破（2B法则）和流动性猎杀作为入场信号。
+2. **绝对日内：** 绝不格局，绝不扛单，绝不过夜（No Overnight）。所有仓位必须在当日/当次波动结束后平仓。
+3. **极简图表：** 只看K线（Price Action）、成交量以及关键的支撑/阻力位。只看 4H（大局）、1H（动能）、15M（执行）。
+
+## 🛡️ 风控铁律 (Risk Management - 核心指令)
+这是你的生死线，任何交易计划必须**绝对服从**以下量化标准：
+1. **硬性止损（最高 1%）：** 入场价与止损价的距离**绝对不允许超过 1%**。既然是极佳的左侧点位，如果做错，意味着支撑/阻力已破，必须在 1% 内无条件认错离场。如果盘面结构需要大于 1% 的止损，则放弃该交易！
+2. **硬性止盈（最低 2.4%）：** 入场价与第一止盈目标价的距离**绝对不允许低于 2.4%**。日内波段的利润必须吃到位。
+3. **盈亏比底线：** 结合上述两点，每笔交易的潜在盈亏比（RR）必须 **≥ 1:2.4**。
+
+## ⏱️ 多时间框架分析系统 (MTF)
+- **【4H 级别】定大局：** 画出最核心的强支撑位和强阻力位。这是你左侧挂单或重点关注的“靶区”。
+- **【1H 级别】看动能：** 观察价格靠近靶区时的动能，寻找衰竭、长影线等初步见顶/见底信号。
+- **【15M 级别】精确定位：** 在关键位置，一旦出现“插针收回”、“假跌破/假突破”、“吞没形态”，立刻触发进场条件。
+
+## 💬 交互规则与回复框架
+当用户询问某个币种或提供盘面信息时，你必须以冷酷、专业的“大师口吻”回复，严格按照以下结构输出，并在计算点位时**严格执行 1% SL / 2.4% TP** 的数学规则：
+
+**【1. 盘面扫描 (4H/1H)】**
+- 简述日内宏观结构，明确给出**日内强阻力位**和**日内强支撑位**。
+
+**【2. 狙击计划 (15M入场策略)】**
+- **做空预案：** 涨至哪个位置，观察什么15M信号开空。
+- **做多预案：** 跌至哪个位置，观察什么15M信号开多。
+
+**【3. 纪律与风控点位 (精确计算)】**
+- 针对上述预案，给出精确的量化点位区间：
+  - **入场点 (Entry)：** [具体价格或极窄区间]
+  - **止损点 (SL)：** [具体价格，计算方式：做多为 Entry * 0.99，做空为 Entry * 1.01，距离严格控制在 1% 以内]
+  - **止盈点 (TP)：** [具体价格，计算方式：做多为 Entry * 1.024，做空为 Entry * 0.976，距离至少满足 2.4%]
+
+**【4. 大师箴言】**
+- 附带一句关于“纪律、耐心、左侧、极严风控”的简短、冷酷的交易心法（例如：“止损 1% 是保护你留在牌桌的铠甲，不够 2.4% 的利润不配让你承担风险。”）
+
+## ⚠️ 注意：
+你的分析必须基于当前最新的市场逻辑，不废话，只给能执行的交易计划。**在输出点位时，请务必在后台进行数学验算，确保止损幅度 ≤ 1%，止盈幅度 ≥ 2.4%**。请确认你已理解你的角色和风控铁律。"""
+AI_CHAT_MODEL = os.getenv("HELPER_AI_CHAT_MODEL", os.getenv("DEFAULT_CHAT_MODEL", "gemini-3.5-flash"))
+KLINE_SYMBOLS = {
+    "btc": "BTCUSDT",
+    "eth": "ETHUSDT",
+}
+KLINE_DAY_WINDOWS = {
+    "4h": "30 days",
+    "1h": "20 days",
+    "15m": "7 days",
+}
+KLINE_LIMIT_WINDOWS = {
+    "1m": 60,
+}
 
 # 存储用户的生图会话状态
 # { user_id: { 'ai': HelperAI, 'last_image': bytes | None } }
 user_sessions = {}
+
+# 存储用户的文字 AI 会话状态
+# { user_id: HelperTextAI }
+ai_sessions = {}
+
+
+async def reply_text_chunks(update: Update, text: str):
+    """Telegram 单条消息有长度限制，长回复分段发送。"""
+    if not text:
+        return
+    chunk_size = 3900
+    for i in range(0, len(text), chunk_size):
+        await update.message.reply_text(text[i:i + chunk_size])
+
+
+def get_two_database_url():
+    database_url = os.getenv("TWO_DATABASE_URL")
+    if not database_url:
+        raise ValueError("请设置 TWO_DATABASE_URL 环境变量")
+    return database_url
+
+
+def fetch_kline_rows(symbol, interval_name, days=None, limit=None):
+    database_url = get_two_database_url()
+    with psycopg2.connect(database_url) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if days:
+                cur.execute(
+                    """
+                    SELECT open_time, close_time, open_price, high_price, low_price,
+                           close_price, volume
+                    FROM kline_data
+                    WHERE symbol = %s
+                      AND "interval" = %s
+                      AND open_time >= now() - (%s)::interval
+                    ORDER BY open_time ASC
+                    """,
+                    (symbol, interval_name, days),
+                )
+                return cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT open_time, close_time, open_price, high_price, low_price,
+                       close_price, volume
+                FROM (
+                    SELECT open_time, close_time, open_price, high_price, low_price,
+                           close_price, volume
+                    FROM kline_data
+                    WHERE symbol = %s
+                      AND "interval" = %s
+                    ORDER BY open_time DESC
+                    LIMIT %s
+                ) recent
+                ORDER BY open_time ASC
+                """,
+                (symbol, interval_name, limit),
+            )
+            return cur.fetchall()
+
+
+def format_decimal(value):
+    text = format(value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def format_kline_time(value):
+    if value.tzinfo is None:
+        return value.isoformat(timespec="minutes")
+    return value.astimezone(datetime.timezone.utc).isoformat(timespec="minutes").replace("+00:00", "Z")
+
+
+def build_kline_prompt(symbol):
+    sections = []
+    counts = {}
+
+    for interval_name, days in KLINE_DAY_WINDOWS.items():
+        rows = fetch_kline_rows(symbol, interval_name, days=days)
+        counts[interval_name] = len(rows)
+        sections.append(format_kline_section(interval_name, rows))
+
+    for interval_name, limit in KLINE_LIMIT_WINDOWS.items():
+        rows = fetch_kline_rows(symbol, interval_name, limit=limit)
+        counts[interval_name] = len(rows)
+        sections.append(format_kline_section(interval_name, rows))
+
+    prompt = (
+        f"以下是 {symbol} 最新多周期 K 线数据。请接收并记住这些数据，作为后续回答该交易对问题时的上下文。"
+        "本次只确认接收，不需要输出交易计划；当用户下一次要求分析时，再严格按你的回复框架输出，"
+        "给出 4H/1H 强支撑和强阻力、15M 入场触发条件，并精确计算 Entry / SL / TP。"
+        "若数据不足以支持交易，明确说放弃。\n\n"
+        "字段: open_time,open,high,low,close,volume\n\n"
+        + "\n\n".join(sections)
+    )
+    return prompt, counts
+
+
+def format_kline_section(interval_name, rows):
+    lines = [f"[{interval_name}]"]
+    for row in rows:
+        lines.append(
+            ",".join(
+                [
+                    format_kline_time(row["open_time"]),
+                    format_decimal(row["open_price"]),
+                    format_decimal(row["high_price"]),
+                    format_decimal(row["low_price"]),
+                    format_decimal(row["close_price"]),
+                    format_decimal(row["volume"]),
+                ]
+            )
+        )
+    return "\n".join(lines)
 
 class HelperAI:
     def __init__(self, mode, system_instruction):
@@ -127,6 +297,35 @@ class HelperAI:
         
         return None, response.text
 
+
+class HelperTextAI:
+    def __init__(self, system_instruction=AI_SYSTEM_PROMPT):
+        self.client = chat_router.get_client()
+        self.system_instruction = system_instruction
+        self.chat = self.client.chats.create(
+            model=AI_CHAT_MODEL,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction
+            )
+        )
+
+    async def chat_text(self, prompt):
+        """调用 Gemini 文字聊天并保留本次 /ai 会话上下文。"""
+        def _do_chat_send(cli):
+            self.client = cli
+            history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else getattr(self.chat, "history", [])
+            self.chat = self.client.chats.create(
+                model=AI_CHAT_MODEL,
+                config=types.GenerateContentConfig(
+                    system_instruction=self.system_instruction
+                ),
+                history=history
+            )
+            return self.chat.send_message(prompt)
+
+        response = chat_router.execute_with_retry(_do_chat_send)
+        return response.text or ""
+
 async def check_auth(update: Update):
     if update.effective_user.id != ALLOWED_USER_ID:
         await update.message.reply_text("Unauthorized.")
@@ -148,6 +347,7 @@ async def start_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         instruction += "Maintain consistency for both Nanase and Siyuan based on references."
 
     try:
+        ai_sessions.pop(user_id, None)
         user_sessions[user_id] = {
             'ai': HelperAI(cmd, instruction),
             'last_image': None
@@ -164,6 +364,56 @@ async def end_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("没有正在运行的生图会话。")
 
+async def start_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_auth(update): return
+
+    user_id = update.effective_user.id
+    try:
+        user_sessions.pop(user_id, None)
+        ai_sessions[user_id] = HelperTextAI()
+        await update.message.reply_text("AI 会话已启动。现在可以直接聊天，输入 /aiend 结束。")
+    except Exception as e:
+        await update.message.reply_text(f"AI 会话启动失败: {str(e)}")
+
+async def end_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_auth(update): return
+
+    user_id = update.effective_user.id
+    if user_id in ai_sessions:
+        del ai_sessions[user_id]
+        await update.message.reply_text("AI 会话已结束。")
+    else:
+        await update.message.reply_text("没有正在运行的 AI 会话。")
+
+async def kline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_auth(update): return
+
+    user_id = update.effective_user.id
+    if user_id not in ai_sessions:
+        await update.message.reply_text("请先使用 /ai 开始 AI 会话，再使用 /kline btc 或 /kline eth。")
+        return
+
+    if not context.args:
+        await update.message.reply_text("用法：/kline btc 或 /kline eth")
+        return
+
+    symbol_key = context.args[0].lower()
+    symbol = KLINE_SYMBOLS.get(symbol_key)
+    if not symbol:
+        await update.message.reply_text("只支持 /kline btc 或 /kline eth。")
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        prompt, counts = build_kline_prompt(symbol)
+        logger.error(f"K线数据已组装: {symbol} {counts}")
+        await ai_sessions[user_id].chat_text(prompt)
+        await update.message.reply_text(f"已发送数据 {symbol}")
+    except Exception as e:
+        logger.error(f"K线数据发送出错: {e}")
+        await update.message.reply_text(f"K线数据发送失败: {str(e)}")
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update): return
     help_text = (
@@ -172,10 +422,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/gen_me — 启动生图模式（参考 Nanase）\n"
         "/gen_user — 启动生图模式（参考 Siyuan）\n"
         "/gen_both — 启动生图模式（同时参考 Nanase 和 Siyuan）\n"
+        "/ai — 启动加密货币合约交易 AI 聊天模式\n"
+        "/kline btc|eth — 将多周期 K 线数据发送给当前 AI 会话\n"
+        "/aiend — 结束当前 AI 聊天会话\n"
         "/end — 结束当前生图会话\n"
         "/help — 显示此帮助信息\n\n"
         "💡 启动任意生图模式后，直接发送文字描述即可生成图片，"
-        "也可先发送一张图片作为参考，再发送描述。可持续对话修改，完成后使用 /end 结束。"
+        "也可先发送一张图片作为参考，再发送描述。可持续对话修改，完成后使用 /end 结束。\n"
+        "💬 启动 /ai 后可直接发送文字和 AI 聊天，完成后使用 /aiend 结束。"
     )
     await update.message.reply_text(help_text, parse_mode='HTML')
 
@@ -184,7 +438,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if user_id not in user_sessions:
-        await update.message.reply_text("请先使用 /gen, /gen_me, /gen_user 或 /gen_both 开始生图。")
+        if user_id in ai_sessions:
+            await update.message.reply_text("当前是 /ai 文字聊天会话。请发送文字聊天，或输入 /aiend 结束后再开始生图。")
+        else:
+            await update.message.reply_text("请先使用 /gen, /gen_me, /gen_user 或 /gen_both 开始生图。")
         return
 
     # 取最大尺寸的照片
@@ -215,9 +472,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update): return
     user_id = update.effective_user.id
+
+    if user_id in ai_sessions:
+        prompt = update.message.text
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+        try:
+            reply = await ai_sessions[user_id].chat_text(prompt)
+            if reply:
+                await reply_text_chunks(update, reply)
+            else:
+                await update.message.reply_text("AI 没有返回内容，请再试一次。")
+        except Exception as e:
+            logger.error(f"AI 聊天出错: {e}")
+            await update.message.reply_text(f"出错啦: {str(e)}")
+        return
     
     if user_id not in user_sessions:
-        await update.message.reply_text("请先使用 /gen, /gen_me, /gen_user 或 /gen_both 开始生图。")
+        await update.message.reply_text("请先使用 /gen, /gen_me, /gen_user, /gen_both 开始生图，或使用 /ai 开始文字聊天。")
         return
 
     prompt = update.message.text
@@ -252,6 +524,9 @@ def main():
     application.add_handler(CommandHandler("gen_me", start_gen))
     application.add_handler(CommandHandler("gen_user", start_gen))
     application.add_handler(CommandHandler("gen_both", start_gen))
+    application.add_handler(CommandHandler("ai", start_ai))
+    application.add_handler(CommandHandler("kline", kline_command))
+    application.add_handler(CommandHandler("aiend", end_ai))
     application.add_handler(CommandHandler("end", end_gen))
     application.add_handler(CommandHandler("help", help_command))
     
