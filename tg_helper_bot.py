@@ -430,7 +430,7 @@ def parse_kline_args_from_text(text):
     return parts[1:]
 
 
-async def run_kline(update: Update, symbol_key):
+async def run_kline(update: Update, context: ContextTypes.DEFAULT_TYPE, symbol_key):
     user_id = update.effective_user.id
     if user_id not in ai_sessions:
         debug_log(f"/kline 被拒绝，AI会话不存在: user_id={user_id}")
@@ -469,7 +469,7 @@ async def kline_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update): return
 
     symbol_key = context.args[0] if context.args else None
-    await run_kline(update, symbol_key)
+    await run_kline(update, context, symbol_key)
 
 async def kline_message_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text if update.message else ""
@@ -478,7 +478,7 @@ async def kline_message_fallback(update: Update, context: ContextTypes.DEFAULT_T
     if not await check_auth(update): return
 
     symbol_key = args[0] if args else None
-    await run_kline(update, symbol_key)
+    await run_kline(update, context, symbol_key)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     debug_log("收到 /help")
