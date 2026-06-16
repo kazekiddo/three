@@ -3,6 +3,8 @@ import logging
 import io
 import datetime
 import traceback
+import html
+import re
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from PIL import Image
@@ -109,6 +111,54 @@ async def reply_text_chunks(update: Update, text: str):
     chunk_size = 3900
     for i in range(0, len(text), chunk_size):
         await update.message.reply_text(text[i:i + chunk_size])
+
+
+def markdown_to_telegram_html(text):
+    placeholders = []
+
+    def stash_code_block(match):
+        code = html.escape(match.group(1).strip())
+        placeholders.append(f"<pre>{code}</pre>")
+        return f"@@CODEBLOCK{len(placeholders) - 1}@@"
+
+    def stash_inline_code(match):
+        code = html.escape(match.group(1))
+        placeholders.append(f"<code>{code}</code>")
+        return f"@@CODEBLOCK{len(placeholders) - 1}@@"
+
+    converted = re.sub(r"```(?:\w+)?\n([\s\S]*?)```", stash_code_block, text)
+    converted = re.sub(r"`([^`\n]+)`", stash_inline_code, converted)
+    converted = html.escape(converted)
+
+    converted = re.sub(r"^#{1,6}\s*(.+)$", r"<b>\1</b>", converted, flags=re.MULTILINE)
+    converted = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", converted)
+    converted = re.sub(r"__(.+?)__", r"<b>\1</b>", converted)
+    converted = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", converted)
+    converted = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", converted)
+    converted = re.sub(r"~~(.+?)~~", r"<s>\1</s>", converted)
+
+    for i, block in enumerate(placeholders):
+        converted = converted.replace(f"@@CODEBLOCK{i}@@", block)
+
+    return converted
+
+
+async def reply_markdown_chunks(update: Update, text: str):
+    """把常见 Markdown 转成 Telegram HTML；失败时降级纯文本。"""
+    if not text:
+        return
+    chunk_size = 3500
+    for i in range(0, len(text), chunk_size):
+        chunk = text[i:i + chunk_size]
+        try:
+            await update.message.reply_text(
+                markdown_to_telegram_html(chunk),
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            debug_log(f"Markdown/HTML 回复失败，降级纯文本: error={e}", e)
+            await update.message.reply_text(chunk)
 
 
 def get_two_database_url():
@@ -589,7 +639,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             reply = await ai_sessions[user_id].chat_text(prompt)
             if reply:
-                await reply_text_chunks(update, reply)
+                await reply_markdown_chunks(update, reply)
             else:
                 await update.message.reply_text("AI 没有返回内容，请再试一次。")
         except Exception as e:
