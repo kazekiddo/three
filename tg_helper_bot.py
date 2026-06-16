@@ -179,7 +179,7 @@ def fetch_kline_rows(symbol, interval_name, days=None, limit=None):
             if days:
                 cur.execute(
                     """
-                    SELECT open_time, close_time, open_price, high_price, low_price,
+                    SELECT id, open_time, close_time, open_price, high_price, low_price,
                            close_price, volume
                     FROM kline_data
                     WHERE symbol = %s
@@ -195,10 +195,10 @@ def fetch_kline_rows(symbol, interval_name, days=None, limit=None):
 
             cur.execute(
                 """
-                SELECT open_time, close_time, open_price, high_price, low_price,
+                SELECT id, open_time, close_time, open_price, high_price, low_price,
                        close_price, volume
                 FROM (
-                    SELECT open_time, close_time, open_price, high_price, low_price,
+                    SELECT id, open_time, close_time, open_price, high_price, low_price,
                            close_price, volume
                     FROM kline_data
                     WHERE symbol = %s
@@ -228,20 +228,34 @@ def format_kline_time(value):
     return value.isoformat(timespec="minutes")
 
 
-def build_kline_prompt(symbol):
+def build_kline_prompt(symbol, seen_ids_by_interval=None):
     debug_log(f"开始组装K线prompt: symbol={symbol}")
+    if seen_ids_by_interval is None:
+        seen_ids_by_interval = {}
     sections = []
     counts = {}
+    fetched_counts = {}
+    new_ids_by_interval = {}
 
     for interval_name, days in KLINE_DAY_WINDOWS.items():
         rows = fetch_kline_rows(symbol, interval_name, days=days)
-        counts[interval_name] = len(rows)
-        sections.append(format_kline_section(interval_name, rows))
+        fetched_counts[interval_name] = len(rows)
+        seen_ids = seen_ids_by_interval.get(interval_name, set())
+        new_rows = [row for row in rows if row["id"] not in seen_ids]
+        counts[interval_name] = len(new_rows)
+        new_ids_by_interval[interval_name] = {row["id"] for row in new_rows}
+        debug_log(f"K线增量过滤: symbol={symbol}, interval={interval_name}, fetched={len(rows)}, seen={len(seen_ids)}, new={len(new_rows)}")
+        sections.append(format_kline_section(interval_name, new_rows))
 
     for interval_name, limit in KLINE_LIMIT_WINDOWS.items():
         rows = fetch_kline_rows(symbol, interval_name, limit=limit)
-        counts[interval_name] = len(rows)
-        sections.append(format_kline_section(interval_name, rows))
+        fetched_counts[interval_name] = len(rows)
+        seen_ids = seen_ids_by_interval.get(interval_name, set())
+        new_rows = [row for row in rows if row["id"] not in seen_ids]
+        counts[interval_name] = len(new_rows)
+        new_ids_by_interval[interval_name] = {row["id"] for row in new_rows}
+        debug_log(f"K线增量过滤: symbol={symbol}, interval={interval_name}, fetched={len(rows)}, seen={len(seen_ids)}, new={len(new_rows)}")
+        sections.append(format_kline_section(interval_name, new_rows))
 
     prompt = (
         f"以下是 {symbol} 最新多周期 K 线数据。请基于这些数据回答用户接下来的交易问题。"
@@ -250,8 +264,8 @@ def build_kline_prompt(symbol):
         "字段: open_time(Asia/Shanghai),open,high,low,close,volume\n\n"
         + "\n\n".join(sections)
     )
-    debug_log(f"K线prompt组装完成: symbol={symbol}, counts={counts}, chars={len(prompt)}")
-    return prompt, counts
+    debug_log(f"K线prompt组装完成: symbol={symbol}, fetched_counts={fetched_counts}, new_counts={counts}, chars={len(prompt)}")
+    return prompt, counts, fetched_counts, new_ids_by_interval
 
 
 def format_kline_section(interval_name, rows):
@@ -377,6 +391,7 @@ class HelperTextAI:
         self.system_instruction = system_instruction
         self.chat = None
         self.pending_contexts = []
+        self.seen_kline_ids = {}
         debug_log("文字AI本地会话初始化完成，尚未请求AI")
 
     def add_context(self, label, text):
@@ -385,6 +400,16 @@ class HelperTextAI:
             "text": text,
         })
         debug_log(f"已缓存AI上下文: label={label}, chars={len(text)}, pending_contexts={len(self.pending_contexts)}")
+
+    def get_seen_kline_ids(self, symbol):
+        return self.seen_kline_ids.setdefault(symbol, {})
+
+    def remember_kline_ids(self, symbol, new_ids_by_interval):
+        seen_by_interval = self.get_seen_kline_ids(symbol)
+        for interval_name, ids in new_ids_by_interval.items():
+            seen_by_interval.setdefault(interval_name, set()).update(ids)
+        cached_counts = {k: len(v) for k, v in seen_by_interval.items()}
+        debug_log(f"已追加K线ID缓存: symbol={symbol}, cached_counts={cached_counts}")
 
     def build_prompt(self, user_prompt):
         if not self.pending_contexts:
@@ -545,11 +570,19 @@ async def run_kline(update: Update, context: ContextTypes.DEFAULT_TYPE, symbol_k
 
     try:
         debug_log(f"/kline 开始处理: user_id={user_id}, symbol={symbol}")
-        prompt, counts = build_kline_prompt(symbol)
-        debug_log(f"K线数据已组装: {symbol} {counts}")
-        ai_sessions[user_id].add_context(f"{symbol} 多周期K线数据", prompt)
-        debug_log(f"/kline 已缓存，等待下一条普通消息再发送AI: user_id={user_id}, symbol={symbol}")
-        await update.message.reply_text(f"已缓存数据 {symbol}: 4h={counts.get('4h', 0)}, 1h={counts.get('1h', 0)}, 15m={counts.get('15m', 0)}, 1m={counts.get('1m', 0)}。发送普通文本后再请求 AI。")
+        ai_session = ai_sessions[user_id]
+        seen_ids_by_interval = ai_session.get_seen_kline_ids(symbol)
+        prompt, counts, fetched_counts, new_ids_by_interval = build_kline_prompt(symbol, seen_ids_by_interval)
+        total_new = sum(counts.values())
+        debug_log(f"K线数据已组装: {symbol}, fetched={fetched_counts}, new={counts}, total_new={total_new}")
+        if total_new == 0:
+            await update.message.reply_text(f"{symbol} 没有新增 K 线数据。")
+            return
+
+        ai_session.add_context(f"{symbol} 新增多周期K线数据", prompt)
+        ai_session.remember_kline_ids(symbol, new_ids_by_interval)
+        debug_log(f"/kline 增量已缓存，等待下一条普通消息再发送AI: user_id={user_id}, symbol={symbol}")
+        await update.message.reply_text(f"已缓存新增数据 {symbol}: 4h={counts.get('4h', 0)}, 1h={counts.get('1h', 0)}, 15m={counts.get('15m', 0)}, 1m={counts.get('1m', 0)}。发送普通文本后再请求 AI。")
     except Exception as e:
         debug_log(f"K线数据发送出错: user_id={user_id}, symbol={symbol}, error={e}", e)
         await update.message.reply_text(f"K线数据发送失败: {str(e)}")
