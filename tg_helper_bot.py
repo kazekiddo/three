@@ -82,6 +82,8 @@ KLINE_DAY_WINDOWS = {
 KLINE_LIMIT_WINDOWS = {
     "1m": 60,
 }
+BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8), name="Asia/Shanghai")
+PG_TIMEZONE = "Asia/Shanghai"
 
 # 存储用户的生图会话状态
 # { user_id: { 'ai': HelperAI, 'last_image': bytes | None } }
@@ -119,10 +121,11 @@ def get_two_database_url():
 
 
 def fetch_kline_rows(symbol, interval_name, days=None, limit=None):
-    debug_log(f"开始查询K线: symbol={symbol}, interval={interval_name}, days={days}, limit={limit}")
+    debug_log(f"开始查询K线: symbol={symbol}, interval={interval_name}, days={days}, limit={limit}, timezone={PG_TIMEZONE}")
     database_url = get_two_database_url()
     with psycopg2.connect(database_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SET TIME ZONE %s", (PG_TIMEZONE,))
             if days:
                 cur.execute(
                     """
@@ -169,8 +172,10 @@ def format_decimal(value):
 
 def format_kline_time(value):
     if value.tzinfo is None:
-        return value.isoformat(timespec="minutes")
-    return value.astimezone(datetime.timezone.utc).isoformat(timespec="minutes").replace("+00:00", "Z")
+        value = value.replace(tzinfo=BEIJING_TZ)
+    else:
+        value = value.astimezone(BEIJING_TZ)
+    return value.isoformat(timespec="minutes")
 
 
 def build_kline_prompt(symbol):
@@ -189,11 +194,10 @@ def build_kline_prompt(symbol):
         sections.append(format_kline_section(interval_name, rows))
 
     prompt = (
-        f"以下是 {symbol} 最新多周期 K 线数据。请接收并记住这些数据，作为后续回答该交易对问题时的上下文。"
-        "本次只确认接收，不需要输出交易计划；当用户下一次要求分析时，再严格按你的回复框架输出，"
-        "给出 4H/1H 强支撑和强阻力、15M 入场触发条件，并精确计算 Entry / SL / TP。"
+        f"以下是 {symbol} 最新多周期 K 线数据。请基于这些数据回答用户接下来的交易问题。"
+        "分析时严格按你的回复框架输出，给出 4H/1H 强支撑和强阻力、15M 入场触发条件，并精确计算 Entry / SL / TP。"
         "若数据不足以支持交易，明确说放弃。\n\n"
-        "字段: open_time,open,high,low,close,volume\n\n"
+        "字段: open_time(Asia/Shanghai),open,high,low,close,volume\n\n"
         + "\n\n".join(sections)
     )
     debug_log(f"K线prompt组装完成: symbol={symbol}, counts={counts}, chars={len(prompt)}")
@@ -318,22 +322,56 @@ class HelperAI:
 
 class HelperTextAI:
     def __init__(self, system_instruction=AI_SYSTEM_PROMPT):
-        debug_log(f"开始创建文字AI会话: model={AI_CHAT_MODEL}")
-        self.client = chat_router.get_client()
+        debug_log(f"初始化文字AI本地会话: model={AI_CHAT_MODEL}")
+        self.client = None
         self.system_instruction = system_instruction
-        self.chat = self.client.chats.create(
-            model=AI_CHAT_MODEL,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction
-            )
+        self.chat = None
+        self.pending_contexts = []
+        debug_log("文字AI本地会话初始化完成，尚未请求AI")
+
+    def add_context(self, label, text):
+        self.pending_contexts.append({
+            "label": label,
+            "text": text,
+        })
+        debug_log(f"已缓存AI上下文: label={label}, chars={len(text)}, pending_contexts={len(self.pending_contexts)}")
+
+    def build_prompt(self, user_prompt):
+        if not self.pending_contexts:
+            return user_prompt
+
+        context_blocks = []
+        for item in self.pending_contexts:
+            context_blocks.append(f"## {item['label']}\n{item['text']}")
+
+        return (
+            "以下是本次对话前缓存的上下文数据，请在回答用户问题时使用：\n\n"
+            + "\n\n".join(context_blocks)
+            + "\n\n---\n"
+            + f"用户问题：{user_prompt}"
         )
-        debug_log("文字AI会话创建完成")
+
+    def ensure_chat(self):
+        if self.client is None:
+            debug_log(f"开始创建文字AI客户端: model={AI_CHAT_MODEL}")
+            self.client = chat_router.get_client()
+        if self.chat is None:
+            debug_log("开始创建文字AI远程chat")
+            self.chat = self.client.chats.create(
+                model=AI_CHAT_MODEL,
+                config=types.GenerateContentConfig(
+                    system_instruction=self.system_instruction
+                )
+            )
+            debug_log("文字AI远程chat创建完成")
 
     async def chat_text(self, prompt):
         """调用 Gemini 文字聊天并保留本次 /ai 会话上下文。"""
-        debug_log(f"准备发送文字AI消息: chars={len(prompt)}")
+        prompt_to_send = self.build_prompt(prompt)
+        debug_log(f"准备发送文字AI消息: user_chars={len(prompt)}, total_chars={len(prompt_to_send)}, pending_contexts={len(self.pending_contexts)}")
         def _do_chat_send(cli):
             self.client = cli
+            self.ensure_chat()
             history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else getattr(self.chat, "history", [])
             debug_log(f"重建文字AI chat: history_items={len(history)}")
             self.chat = self.client.chats.create(
@@ -343,10 +381,13 @@ class HelperTextAI:
                 ),
                 history=history
             )
-            return self.chat.send_message(prompt)
+            return self.chat.send_message(prompt_to_send)
 
         response = chat_router.execute_with_retry(_do_chat_send)
         debug_log(f"文字AI返回完成: text_chars={len(response.text or '')}")
+        if self.pending_contexts:
+            debug_log(f"清空已发送缓存上下文: count={len(self.pending_contexts)}")
+            self.pending_contexts.clear()
         return response.text or ""
 
 async def check_auth(update: Update):
@@ -456,10 +497,9 @@ async def run_kline(update: Update, context: ContextTypes.DEFAULT_TYPE, symbol_k
         debug_log(f"/kline 开始处理: user_id={user_id}, symbol={symbol}")
         prompt, counts = build_kline_prompt(symbol)
         debug_log(f"K线数据已组装: {symbol} {counts}")
-        await update.message.reply_text(f"K线数据已读取 {symbol}: 4h={counts.get('4h', 0)}, 1h={counts.get('1h', 0)}, 15m={counts.get('15m', 0)}, 1m={counts.get('1m', 0)}。正在发送给 AI...")
-        await ai_sessions[user_id].chat_text(prompt)
-        debug_log(f"/kline 已发送给AI: user_id={user_id}, symbol={symbol}")
-        await update.message.reply_text(f"已发送数据 {symbol}")
+        ai_sessions[user_id].add_context(f"{symbol} 多周期K线数据", prompt)
+        debug_log(f"/kline 已缓存，等待下一条普通消息再发送AI: user_id={user_id}, symbol={symbol}")
+        await update.message.reply_text(f"已缓存数据 {symbol}: 4h={counts.get('4h', 0)}, 1h={counts.get('1h', 0)}, 15m={counts.get('15m', 0)}, 1m={counts.get('1m', 0)}。发送普通文本后再请求 AI。")
     except Exception as e:
         debug_log(f"K线数据发送出错: user_id={user_id}, symbol={symbol}, error={e}", e)
         await update.message.reply_text(f"K线数据发送失败: {str(e)}")
@@ -490,7 +530,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/gen_user — 启动生图模式（参考 Siyuan）\n"
         "/gen_both — 启动生图模式（同时参考 Nanase 和 Siyuan）\n"
         "/ai — 启动加密货币合约交易 AI 聊天模式\n"
-        "/kline btc|eth — 将多周期 K 线数据发送给当前 AI 会话\n"
+        "/kline btc|eth — 缓存多周期 K 线数据，下一条普通消息一起发送给 AI\n"
         "/aiend — 结束当前 AI 聊天会话\n"
         "/end — 结束当前生图会话\n"
         "/help — 显示此帮助信息\n\n"
