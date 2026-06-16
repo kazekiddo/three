@@ -268,6 +268,23 @@ def build_kline_prompt(symbol, seen_ids_by_interval=None):
     return prompt, counts, fetched_counts, new_ids_by_interval
 
 
+def build_kline_export_text(symbol):
+    prompt, counts, fetched_counts, _ = build_kline_prompt(symbol)
+    return prompt, counts, fetched_counts
+
+
+def write_kline_export(symbol):
+    export_text, counts, fetched_counts = build_kline_export_text(symbol)
+    timestamp = datetime.datetime.now(BEIJING_TZ).strftime("%Y%m%d_%H%M%S")
+    filename = f"kline_{symbol}_{timestamp}_asia_shanghai.txt"
+    path = os.path.abspath(os.path.join(os.getcwd(), filename))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(export_text)
+        f.write("\n")
+    debug_log(f"K线数据已导出: symbol={symbol}, path={path}, counts={counts}, fetched_counts={fetched_counts}, chars={len(export_text)}")
+    return path, counts, fetched_counts, len(export_text)
+
+
 def format_kline_section(interval_name, rows):
     lines = [f"[{interval_name}]"]
     for row in rows:
@@ -546,6 +563,13 @@ def parse_kline_args_from_text(text):
     return parts[1:]
 
 
+def parse_symbol_arg(args):
+    if not args:
+        return None, None
+    symbol_key = args[0].lower()
+    return symbol_key, KLINE_SYMBOLS.get(symbol_key)
+
+
 async def run_kline(update: Update, context: ContextTypes.DEFAULT_TYPE, symbol_key):
     user_id = update.effective_user.id
     if user_id not in ai_sessions:
@@ -558,8 +582,7 @@ async def run_kline(update: Update, context: ContextTypes.DEFAULT_TYPE, symbol_k
         await update.message.reply_text("用法：/kline btc 或 /kline eth")
         return
 
-    symbol_key = symbol_key.lower()
-    symbol = KLINE_SYMBOLS.get(symbol_key)
+    symbol_key, symbol = parse_symbol_arg([symbol_key])
     if not symbol:
         debug_log(f"/kline 参数不支持: arg={symbol_key}")
         await update.message.reply_text("只支持 /kline btc 或 /kline eth。")
@@ -603,6 +626,31 @@ async def kline_message_fallback(update: Update, context: ContextTypes.DEFAULT_T
     symbol_key = args[0] if args else None
     await run_kline(update, context, symbol_key)
 
+async def outk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log(f"收到 /outk: text={update.message.text if update.message else None}, args={context.args}")
+    if not await check_auth(update): return
+
+    symbol_key, symbol = parse_symbol_arg(context.args)
+    if not symbol:
+        await update.message.reply_text("用法：/outk btc 或 /outk eth")
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await update.message.reply_text(f"开始导出 K 线数据 {symbol}...")
+
+    try:
+        path, counts, fetched_counts, char_count = write_kline_export(symbol)
+        await update.message.reply_text(
+            f"已导出 {symbol}\n"
+            f"文件: {path}\n"
+            f"4h={counts.get('4h', 0)}, 1h={counts.get('1h', 0)}, "
+            f"15m={counts.get('15m', 0)}, 1m={counts.get('1m', 0)}\n"
+            f"字符数: {char_count}"
+        )
+    except Exception as e:
+        debug_log(f"K线导出失败: symbol={symbol}, error={e}", e)
+        await update.message.reply_text(f"K线导出失败: {str(e)}")
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     debug_log("收到 /help")
     if not await check_auth(update): return
@@ -614,6 +662,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/gen_both — 启动生图模式（同时参考 Nanase 和 Siyuan）\n"
         "/ai — 启动加密货币合约交易 AI 聊天模式\n"
         "/kline btc|eth — 缓存多周期 K 线数据，下一条普通消息一起发送给 AI\n"
+        "/outk btc|eth — 将多周期 K 线数据导出到当前目录\n"
         "/aiend — 结束当前 AI 聊天会话\n"
         "/end — 结束当前生图会话\n"
         "/help — 显示此帮助信息\n\n"
@@ -728,6 +777,7 @@ def main():
     application.add_handler(CommandHandler("gen_both", start_gen))
     application.add_handler(CommandHandler("ai", start_ai))
     application.add_handler(CommandHandler("kline", kline_command))
+    application.add_handler(CommandHandler("outk", outk_command))
     application.add_handler(CommandHandler("aiend", end_ai))
     application.add_handler(CommandHandler("end", end_gen))
     application.add_handler(CommandHandler("help", help_command))
