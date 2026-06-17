@@ -5,3 +5,5 @@ python-telegram-bot[job-queue]
 numpy
 pgvector
 Pillow
+openai
+requests>=2.31.0

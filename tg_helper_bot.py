@@ -13,6 +13,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google import genai
 from google.genai import types
+from openai import OpenAI
 from key_router import chat_router, image_router
 from google.genai.errors import APIError
 
@@ -71,7 +72,12 @@ AI_SYSTEM_PROMPT = """# Role: 顶级加密货币合约交易大师 (Top-Tier Cry
 
 ## ⚠️ 注意：
 你的分析必须基于当前最新的市场逻辑，不废话，只给能执行的交易计划。**在输出点位时，请务必在后台进行数学验算，确保止损幅度 ≤ 1%，止盈幅度 ≥ 2.4%**。请确认你已理解你的角色和风控铁律。"""
-AI_CHAT_MODEL = os.getenv("HELPER_AI_CHAT_MODEL", os.getenv("DEFAULT_CHAT_MODEL", "gemini-3.5-flash"))
+DEFAULT_AI_PROVIDER = os.getenv("HELPER_AI_PROVIDER", "gemini").lower()
+GEMINI_CHAT_MODEL = os.getenv("HELPER_GEMINI_MODEL", os.getenv("HELPER_AI_CHAT_MODEL", os.getenv("DEFAULT_CHAT_MODEL", "gemini-3.5-flash")))
+OPENAI_CHAT_MODEL = os.getenv("HELPER_OPENAI_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1"))
+OPENAI_BASE_URL = os.getenv("HELPER_OPENAI_BASE_URL", os.getenv("OPENAI_BASE_URL"))
+OPENAI_API_KEY_VALUE = os.getenv("HELPER_OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
+OPENAI_REASONING_EFFORT = os.getenv("HELPER_OPENAI_REASONING_EFFORT", os.getenv("OPENAI_REASONING_EFFORT", "xhigh"))
 KLINE_SYMBOLS = {
     "btc": "BTCUSDT",
     "eth": "ETHUSDT",
@@ -403,13 +409,27 @@ class HelperAI:
 
 class HelperTextAI:
     def __init__(self, system_instruction=AI_SYSTEM_PROMPT):
-        debug_log(f"初始化文字AI本地会话: model={AI_CHAT_MODEL}")
-        self.client = None
+        self.provider = DEFAULT_AI_PROVIDER if DEFAULT_AI_PROVIDER in ("gemini", "openai") else "gemini"
+        self.model = GEMINI_CHAT_MODEL if self.provider == "gemini" else OPENAI_CHAT_MODEL
+        debug_log(f"初始化文字AI本地会话: provider={self.provider}, model={self.model}")
+        self.gemini_client = None
+        self.openai_client = None
         self.system_instruction = system_instruction
-        self.chat = None
+        self.messages = []
         self.pending_contexts = []
         self.seen_kline_ids = {}
         debug_log("文字AI本地会话初始化完成，尚未请求AI")
+
+    def set_provider(self, provider, model=None):
+        provider = (provider or "").lower()
+        if provider not in ("gemini", "openai"):
+            raise ValueError("provider 只支持 gemini 或 openai")
+        self.provider = provider
+        self.model = model or (GEMINI_CHAT_MODEL if provider == "gemini" else OPENAI_CHAT_MODEL)
+        debug_log(f"文字AI已切换模型: provider={self.provider}, model={self.model}, history_messages={len(self.messages)}")
+
+    def model_status(self):
+        return f"{self.provider}:{self.model}"
 
     def add_context(self, label, text):
         self.pending_contexts.append({
@@ -443,44 +463,78 @@ class HelperTextAI:
             + f"用户问题：{user_prompt}"
         )
 
-    def ensure_chat(self):
-        if self.client is None:
-            debug_log(f"开始创建文字AI客户端: model={AI_CHAT_MODEL}")
-            self.client = chat_router.get_client()
-        if self.chat is None:
-            debug_log("开始创建文字AI远程chat")
-            self.chat = self.client.chats.create(
-                model=AI_CHAT_MODEL,
-                config=types.GenerateContentConfig(
-                    system_instruction=self.system_instruction
-                )
-            )
-            debug_log("文字AI远程chat创建完成")
+    def get_openai_client(self):
+        if self.openai_client is None:
+            kwargs = {}
+            if OPENAI_BASE_URL:
+                kwargs["base_url"] = OPENAI_BASE_URL
+            if OPENAI_API_KEY_VALUE:
+                kwargs["api_key"] = OPENAI_API_KEY_VALUE
+            elif OPENAI_BASE_URL:
+                kwargs["api_key"] = "not-needed"
+            debug_log(f"开始创建OpenAI客户端: base_url_configured={bool(OPENAI_BASE_URL)}, api_key_configured={bool(OPENAI_API_KEY_VALUE)}")
+            self.openai_client = OpenAI(**kwargs)
+        return self.openai_client
 
-    async def chat_text(self, prompt):
-        """调用 Gemini 文字聊天并保留本次 /ai 会话上下文。"""
-        prompt_to_send = self.build_prompt(prompt)
-        debug_log(f"准备发送文字AI消息: user_chars={len(prompt)}, total_chars={len(prompt_to_send)}, pending_contexts={len(self.pending_contexts)}")
+    def gemini_history(self):
+        history = []
+        for message in self.messages:
+            role = "model" if message["role"] == "assistant" else "user"
+            history.append({
+                "role": role,
+                "parts": [types.Part.from_text(text=message["content"])]
+            })
+        return history
+
+    def send_gemini(self, prompt):
+        debug_log(f"准备调用Gemini文字模型: model={self.model}, history_messages={len(self.messages)}")
+
         def _do_chat_send(cli):
-            self.client = cli
-            self.ensure_chat()
-            history = getattr(self.chat, "_curated_history", []) if hasattr(self.chat, "_curated_history") else getattr(self.chat, "history", [])
-            debug_log(f"重建文字AI chat: history_items={len(history)}")
-            self.chat = self.client.chats.create(
-                model=AI_CHAT_MODEL,
+            self.gemini_client = cli
+            chat = self.gemini_client.chats.create(
+                model=self.model,
                 config=types.GenerateContentConfig(
                     system_instruction=self.system_instruction
                 ),
-                history=history
+                history=self.gemini_history()
             )
-            return self.chat.send_message(prompt_to_send)
+            return chat.send_message(prompt)
 
         response = chat_router.execute_with_retry(_do_chat_send)
-        debug_log(f"文字AI返回完成: text_chars={len(response.text or '')}")
+        return response.text or ""
+
+    def send_openai(self, prompt):
+        debug_log(f"准备调用OpenAI文字模型: model={self.model}, reasoning_effort={OPENAI_REASONING_EFFORT}, history_messages={len(self.messages)}")
+        client = self.get_openai_client()
+        messages = [{"role": "system", "content": self.system_instruction}]
+        messages.extend(self.messages)
+        messages.append({"role": "user", "content": prompt})
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=0.7,
+            reasoning_effort=OPENAI_REASONING_EFFORT,
+            stream=False,
+        )
+        return response.choices[0].message.content or ""
+
+    async def chat_text(self, prompt):
+        """调用当前文字模型并保留本次 /ai 会话上下文。"""
+        prompt_to_send = self.build_prompt(prompt)
+        debug_log(f"准备发送文字AI消息: provider={self.provider}, model={self.model}, user_chars={len(prompt)}, total_chars={len(prompt_to_send)}, pending_contexts={len(self.pending_contexts)}")
+
+        if self.provider == "openai":
+            reply = self.send_openai(prompt_to_send)
+        else:
+            reply = self.send_gemini(prompt_to_send)
+
+        debug_log(f"文字AI返回完成: provider={self.provider}, model={self.model}, text_chars={len(reply or '')}")
+        self.messages.append({"role": "user", "content": prompt_to_send})
+        self.messages.append({"role": "assistant", "content": reply})
         if self.pending_contexts:
             debug_log(f"清空已发送缓存上下文: count={len(self.pending_contexts)}")
             self.pending_contexts.clear()
-        return response.text or ""
+        return reply
 
 async def check_auth(update: Update):
     user_id = update.effective_user.id if update.effective_user else None
@@ -534,7 +588,7 @@ async def start_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_sessions.pop(user_id, None)
         ai_sessions[user_id] = HelperTextAI()
         debug_log(f"AI会话已写入内存: user_id={user_id}, active_ai_sessions={len(ai_sessions)}")
-        await update.message.reply_text("AI 会话已启动。现在可以直接聊天，输入 /aiend 结束。")
+        await update.message.reply_text(f"AI 会话已启动，当前模型 {ai_sessions[user_id].model_status()}。现在可以直接聊天，输入 /aiend 结束。")
     except Exception as e:
         debug_log(f"AI 会话启动失败: user_id={user_id}, error={e}", e)
         await update.message.reply_text(f"AI 会话启动失败: {str(e)}")
@@ -549,6 +603,46 @@ async def end_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("AI 会话已结束。")
     else:
         await update.message.reply_text("没有正在运行的 AI 会话。")
+
+async def ai_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log(f"收到 /aimodel: args={context.args}")
+    if not await check_auth(update): return
+
+    user_id = update.effective_user.id
+    if user_id not in ai_sessions:
+        await update.message.reply_text("请先使用 /ai 开始 AI 会话。")
+        return
+
+    session = ai_sessions[user_id]
+    await update.message.reply_text(
+        "当前 AI 模型：\n"
+        f"{session.model_status()}\n\n"
+        "切换命令：\n"
+        "/use gemini [model]\n"
+        "/use openai [model]"
+    )
+
+async def use_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log(f"收到 /use: args={context.args}")
+    if not await check_auth(update): return
+
+    user_id = update.effective_user.id
+    if user_id not in ai_sessions:
+        await update.message.reply_text("请先使用 /ai 开始 AI 会话。")
+        return
+
+    if not context.args:
+        await update.message.reply_text("用法：/use gemini [model] 或 /use openai [model]")
+        return
+
+    provider = context.args[0].lower()
+    model = context.args[1] if len(context.args) > 1 else None
+    try:
+        ai_sessions[user_id].set_provider(provider, model=model)
+        await update.message.reply_text(f"已切换到 {ai_sessions[user_id].model_status()}")
+    except Exception as e:
+        debug_log(f"切换AI模型失败: user_id={user_id}, error={e}", e)
+        await update.message.reply_text(f"切换失败: {str(e)}")
 
 def parse_kline_args_from_text(text):
     if not text:
@@ -661,6 +755,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/gen_user — 启动生图模式（参考 Siyuan）\n"
         "/gen_both — 启动生图模式（同时参考 Nanase 和 Siyuan）\n"
         "/ai — 启动加密货币合约交易 AI 聊天模式\n"
+        "/aimodel — 查看当前 AI 模型\n"
+        "/use gemini|openai [model] — 切换 AI 模型后端\n"
         "/kline btc|eth — 缓存多周期 K 线数据，下一条普通消息一起发送给 AI\n"
         "/outk btc|eth — 将多周期 K 线数据导出到当前目录\n"
         "/aiend — 结束当前 AI 聊天会话\n"
@@ -766,7 +862,11 @@ def main():
         "Helper Bot 准备启动: "
         f"token_configured={bool(token)}, "
         f"TWO_DATABASE_URL_configured={bool(os.getenv('TWO_DATABASE_URL'))}, "
-        f"AI_CHAT_MODEL={AI_CHAT_MODEL}"
+        f"DEFAULT_AI_PROVIDER={DEFAULT_AI_PROVIDER}, "
+        f"GEMINI_CHAT_MODEL={GEMINI_CHAT_MODEL}, "
+        f"OPENAI_CHAT_MODEL={OPENAI_CHAT_MODEL}, "
+        f"OPENAI_REASONING_EFFORT={OPENAI_REASONING_EFFORT}, "
+        f"OPENAI_BASE_URL_configured={bool(OPENAI_BASE_URL)}"
     )
 
     application = Application.builder().token(token).build()
@@ -776,6 +876,8 @@ def main():
     application.add_handler(CommandHandler("gen_user", start_gen))
     application.add_handler(CommandHandler("gen_both", start_gen))
     application.add_handler(CommandHandler("ai", start_ai))
+    application.add_handler(CommandHandler("aimodel", ai_model_command))
+    application.add_handler(CommandHandler("use", use_model_command))
     application.add_handler(CommandHandler("kline", kline_command))
     application.add_handler(CommandHandler("outk", outk_command))
     application.add_handler(CommandHandler("aiend", end_ai))
