@@ -385,6 +385,9 @@ kline_memory_cache = {}
 # 存储 5m 自动交易 AI 会话状态，保留定时请求的上下文
 auto_trade_ai_session = None
 
+# 存储自动交易已通知用户的最近指令，避免重复推送同一状态
+auto_trade_last_notified_actions = {}
+
 
 def debug_log(message, exc=None):
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
@@ -993,16 +996,41 @@ async def send_bot_text_chunks(bot, chat_id, text):
         await bot.send_message(chat_id=chat_id, text=text[i:i + chunk_size])
 
 
-async def notify_auto_trade_action(context: ContextTypes.DEFAULT_TYPE, reply):
+async def notify_auto_trade_action(context: ContextTypes.DEFAULT_TYPE, symbol, reply):
     debug_log(f"自动交易AI回复内容(通知判断前):\n{reply or ''}")
     action = extract_auto_trade_action(reply)
     if not action:
-        debug_log("自动交易AI未触发用户通知")
+        debug_log("自动交易AI未命中可通知指令，不更新通知去重缓存")
+        return False
+
+    last_action = auto_trade_last_notified_actions.get(symbol)
+    if action == last_action:
+        debug_log(f"自动交易AI跳过重复通知: symbol={symbol}, action={action}")
         return False
 
     await send_bot_text_chunks(context.bot, ALLOWED_USER_ID, reply)
+    auto_trade_last_notified_actions[symbol] = action
     debug_log(f"自动交易AI已通知用户: user_id={ALLOWED_USER_ID}, action={action}, chars={len(reply or '')}")
     return True
+
+
+def clear_auto_trade_state():
+    global auto_trade_ai_session
+    had_ai_session = auto_trade_ai_session is not None
+    kline_cache_symbols = list(kline_memory_cache.keys())
+    notified_symbols = list(auto_trade_last_notified_actions.keys())
+
+    auto_trade_ai_session = None
+    kline_memory_cache.clear()
+    auto_trade_last_notified_actions.clear()
+
+    debug_log(
+        "自动交易状态已清空: "
+        f"had_ai_session={had_ai_session}, "
+        f"kline_cache_symbols={kline_cache_symbols}, "
+        f"notified_symbols={notified_symbols}"
+    )
+    return had_ai_session, kline_cache_symbols, notified_symbols
 
 
 async def check_auth(update: Update):
@@ -1214,6 +1242,20 @@ async def outk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         debug_log(f"K线导出失败: symbol={symbol}, error={e}", e)
         await update.message.reply_text(f"K线导出失败: {str(e)}")
 
+
+async def clear_auto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    debug_log(f"收到 /clearAuto: text={update.message.text if update.message else None}")
+    if not await check_auth(update): return
+
+    had_ai_session, kline_cache_symbols, notified_symbols = clear_auto_trade_state()
+    await update.message.reply_text(
+        "已清空自动交易 AI 上下文和内存 K 线，下一轮将重新开始。\n"
+        f"AI会话: {'已重置' if had_ai_session else '原本为空'}\n"
+        f"K线缓存: {len(kline_cache_symbols)} 个 symbol\n"
+        f"通知缓存: {len(notified_symbols)} 个 symbol"
+    )
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     debug_log("收到 /help")
     if not await check_auth(update): return
@@ -1228,6 +1270,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/use gemini|openai [model] — 切换 AI 模型后端\n"
         "/kline btc|eth — 缓存多周期 K 线数据，下一条普通消息一起发送给 AI\n"
         "/outk btc|eth — 将多周期 K 线数据导出到当前目录\n"
+        "/clearAuto — 清空自动交易 AI 上下文和内存 K 线\n"
         "/aiend — 结束当前 AI 聊天会话\n"
         "/end — 结束当前生图会话\n"
         "/help — 显示此帮助信息\n\n"
@@ -1326,7 +1369,7 @@ async def btc_kline_cache_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         refresh_kline_memory_cache(AUTO_KLINE_SYMBOL)
         reply = await send_auto_trade_kline_to_ai(AUTO_KLINE_SYMBOL)
-        await notify_auto_trade_action(context, reply)
+        await notify_auto_trade_action(context, AUTO_KLINE_SYMBOL, reply)
     except Exception as e:
         debug_log(f"定时K线缓存/自动交易AI任务失败: symbol={AUTO_KLINE_SYMBOL}, error={e}", e)
 
@@ -1372,6 +1415,7 @@ def main():
     application.add_handler(CommandHandler("use", use_model_command))
     application.add_handler(CommandHandler("kline", kline_command))
     application.add_handler(CommandHandler("outk", outk_command))
+    application.add_handler(CommandHandler(["clearAuto", "clearauto"], clear_auto_command))
     application.add_handler(CommandHandler("aiend", end_ai))
     application.add_handler(CommandHandler("end", end_gen))
     application.add_handler(CommandHandler("help", help_command))
