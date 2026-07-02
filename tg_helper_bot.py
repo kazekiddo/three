@@ -91,9 +91,6 @@ KLINE_LIMIT_WINDOWS = {
     "1m": 60,
 }
 KLINE_INTERVAL_ORDER = tuple(KLINE_DAY_WINDOWS.keys()) + tuple(KLINE_LIMIT_WINDOWS.keys())
-AUTO_KLINE_SYMBOL_KEY = "btc"
-AUTO_KLINE_SYMBOL = KLINE_SYMBOLS[AUTO_KLINE_SYMBOL_KEY]
-AUTO_KLINE_CACHE_INTERVAL_SECONDS = 5 * 60
 AUTO_TRADE_SYSTEM_PROMPT = """
 # Role: 顶级加密货币合约交易大师 / 5分钟实时操作指令系统
 
@@ -1365,15 +1362,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     debug_log(f"Telegram handler 未捕获异常: update={update}, error={context.error}", context.error)
 
 
-async def btc_kline_cache_job(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        refresh_kline_memory_cache(AUTO_KLINE_SYMBOL)
-        reply = await send_auto_trade_kline_to_ai(AUTO_KLINE_SYMBOL)
-        await notify_auto_trade_action(context, AUTO_KLINE_SYMBOL, reply)
-    except Exception as e:
-        debug_log(f"定时K线缓存/自动交易AI任务失败: symbol={AUTO_KLINE_SYMBOL}, error={e}", e)
-
-
 def main():
     token = os.getenv('TELEGRAM_HELPER_BOT_TOKEN')
     if not token:
@@ -1392,19 +1380,6 @@ def main():
     )
 
     application = Application.builder().token(token).build()
-    if application.job_queue:
-        application.job_queue.run_repeating(
-            btc_kline_cache_job,
-            interval=AUTO_KLINE_CACHE_INTERVAL_SECONDS,
-            first=10,
-            name="btc_kline_memory_cache",
-        )
-        debug_log(
-            f"已注册定时K线缓存任务: symbol_key={AUTO_KLINE_SYMBOL_KEY}, "
-            f"symbol={AUTO_KLINE_SYMBOL}, interval_seconds={AUTO_KLINE_CACHE_INTERVAL_SECONDS}"
-        )
-    else:
-        debug_log("JobQueue 不可用，未注册定时K线缓存任务")
 
     application.add_handler(CommandHandler("gen", start_gen))
     application.add_handler(CommandHandler("gen_me", start_gen))
