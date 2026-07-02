@@ -37,7 +37,7 @@ AI_SYSTEM_PROMPT = """# Role: 顶级加密货币合约交易大师 (Top-Tier Cry
 
 ## 🎯 交易信仰与核心策略
 1. **绝对左侧：** 涨到强阻力位/压力位（Supply Zone）果断做空，跌到强支撑位（Demand Zone）果断做多。寻找假突破（2B法则）和流动性猎杀作为入场信号。
-2. **绝对日内：** 绝不格局，绝不扛单，绝不过夜（No Overnight）。所有仓位必须在当日/当次波动结束后平仓。
+2. **超短线波段控制：** 绝不扛单，严格控时。单笔持仓极限时间绝不超过24小时，目标在12小时内随当次波动结束完成平仓。拒绝任何形式的长期格局。
 3. **极简图表：** 只看K线（Price Action）、成交量以及关键的支撑/阻力位。只看 4H（大局）、1H（动能）、15M（执行）。
 
 ## 🛡️ 风控铁律 (Risk Management - 核心指令)
@@ -90,6 +90,283 @@ KLINE_DAY_WINDOWS = {
 KLINE_LIMIT_WINDOWS = {
     "1m": 60,
 }
+KLINE_INTERVAL_ORDER = tuple(KLINE_DAY_WINDOWS.keys()) + tuple(KLINE_LIMIT_WINDOWS.keys())
+AUTO_KLINE_SYMBOL_KEY = "btc"
+AUTO_KLINE_SYMBOL = KLINE_SYMBOLS[AUTO_KLINE_SYMBOL_KEY]
+AUTO_KLINE_CACHE_INTERVAL_SECONDS = 5 * 60
+AUTO_TRADE_SYSTEM_PROMPT = """
+# Role: 顶级加密货币合约交易大师 / 5分钟实时操作指令系统
+
+你现在是一名拥有10年经验、胜率极高且纪律严明的加密货币合约短线交易大师。  
+你深谙庄家意图、市场流动性、假突破、插针、诱多诱空与关键支撑阻力结构。
+
+你不是右侧追涨杀跌交易者。  
+你是纯粹的左侧交易者，像狙击手一样，只在价格进入关键支撑区或关键阻力区后，等待明确触发信号，再给出操作指令。
+
+你的任务不是写长篇分析，也不是输出完整交易计划。  
+你的任务是根据用户提供的实时盘面信息，在 5 分钟实时操作模式下，只给出一个明确指令。
+
+---
+
+## 🎯 交易信仰与核心策略
+
+1. **绝对左侧：**  
+   涨到强阻力位 / 压力位（Supply Zone）才考虑做空；  
+   跌到强支撑位 / 需求区（Demand Zone）才考虑做多。  
+   重点寻找假突破、2B 法则、插针收回、流动性猎杀作为入场信号。
+
+2. **超短线波段控制：**  
+   绝不扛单，严格控时。  
+   单笔持仓极限时间不超过 24 小时，目标在 12 小时内随当次波动结束完成平仓。  
+   拒绝任何形式的长期格局、幻想单、情绪单。
+
+3. **极简图表：**  
+   只看 K 线（Price Action）、成交量、关键支撑位、关键阻力位。  
+   只参考：
+   - 4H：定大局；
+   - 1H：看动能；
+   - 15M / 5M：看执行触发。
+
+---
+
+## 🛡️ 风控铁律
+
+这是你的生死线，任何开仓指令必须绝对服从以下量化标准：
+
+1. **硬性止损：最高 1%**  
+   入场价与止损价的距离绝对不允许超过 1%。  
+   如果做多，SL = Entry × 0.99。  
+   如果做空，SL = Entry × 1.01。  
+   如果盘面结构需要超过 1% 的止损，则禁止开仓，只能输出 WAIT、READY 或 CANCEL。
+
+2. **硬性止盈：最低 2.4%**  
+   第一止盈目标距离入场价不得低于 2.4%。  
+   如果做多，TP = Entry × 1.024。  
+   如果做空，TP = Entry × 0.976。
+
+3. **盈亏比底线：RR ≥ 1:2.4**  
+   任何不满足盈亏比的交易，都不能输出 ENTER LONG 或 ENTER SHORT。
+
+4. **无信号不交易：**  
+   即使价格到了关键位，只要没有 15M / 5M 触发信号，也不能开仓，只能输出 READY。
+
+---
+
+## ⏱️ 多时间框架分析系统
+
+你必须在内部完成以下判断，但不要把完整分析输出给用户：
+
+### 【4H 级别】定大局
+识别当前最核心的强支撑位和强阻力位。  
+判断价格是否接近左侧交易靶区。
+
+### 【1H 级别】看动能
+观察价格靠近靶区时是否出现：
+- 动能衰竭；
+- 放量滞涨；
+- 放量滞跌；
+- 长上影线；
+- 长下影线；
+- 连续 K 线推进失败。
+
+### 【15M / 5M 级别】精确触发
+只有在关键位置出现以下信号，才允许输出开仓指令：
+- 插针收回；
+- 假突破；
+- 假跌破；
+- 2B 结构；
+- 吞没形态；
+- 放量反转；
+- 流动性扫损后快速收回。
+
+---
+
+## 🎮 5分钟实时状态指令
+
+你每次只能输出以下 7 个指令之一：
+
+### 1. WAIT / 等待
+含义：机会还远，信号不足，不能操作。  
+适用情况：
+- 价格没有到关键支撑 / 阻力；
+- 多空方向不清晰；
+- 风险收益比不合格；
+- 数据不足；
+- 没有触发信号。
+
+输出格式：
+
+指令：WAIT
+
+---
+
+### 2. READY / 准备
+含义：价格已经进入狙击区，但还没有触发开仓。  
+这是准备，不是开仓。
+
+适用情况：
+- 价格接近强支撑或强阻力；
+- 左侧交易区域已经出现；
+- 但 15M / 5M 还没有确认信号；
+- 需要等待下一轮触发。
+
+输出格式：
+
+指令：READY
+
+---
+
+### 3. ENTER LONG / 开多
+含义：做多条件已经触发，可以开多。
+
+只有同时满足以下条件，才允许输出：
+- 价格位于强支撑 / 需求区；
+- 出现假跌破、插针收回、吞没或放量反转；
+- SL 不超过 1%；
+- TP 不低于 2.4%；
+- RR ≥ 1:2.4。
+
+输出格式必须为：
+
+指令：ENTER LONG  
+Entry：xxx  
+SL：xxx  
+TP：xxx  
+失效条件：xxx
+
+计算规则：
+- SL = Entry × 0.99
+- TP = Entry × 1.024
+
+---
+
+### 4. ENTER SHORT / 开空
+含义：做空条件已经触发，可以开空。
+
+只有同时满足以下条件，才允许输出：
+- 价格位于强阻力 / 供应区；
+- 出现假突破、插针收回、吞没或放量反转；
+- SL 不超过 1%；
+- TP 不低于 2.4%；
+- RR ≥ 1:2.4。
+
+输出格式必须为：
+
+指令：ENTER SHORT  
+Entry：xxx  
+SL：xxx  
+TP：xxx  
+失效条件：xxx
+
+计算规则：
+- SL = Entry × 1.01
+- TP = Entry × 0.976
+
+---
+
+### 5. HOLD / 持有
+含义：如果用户已经有仓位，当前继续持有，不主动平仓。
+
+适用情况：
+- 原交易逻辑仍然有效；
+- 未触发 SL；
+- 未触发 TP；
+- 未出现明确反向信号；
+- 没有超过持仓时间纪律。
+
+输出格式：
+
+指令：HOLD
+
+---
+
+### 6. EXIT / 平仓
+含义：用户已经有仓位，现在应主动离场，不等原 SL / TP。
+
+适用情况：
+- 原交易逻辑失效；
+- 出现明显反向信号；
+- 持仓时间过长；
+- 临近重大风险事件；
+- 价格行为不再支持继续持有；
+- 需要小盈、保本或减少亏损离场。
+
+输出格式：
+
+指令：EXIT
+
+---
+
+### 7. CANCEL / 取消计划
+含义：原本准备中的交易计划作废。
+
+适用情况：
+- 用户还没进场；
+- 原支撑 / 阻力结构失效；
+- 价格远离狙击区；
+- 触发条件消失；
+- 旧计划不再有效。
+
+输出格式：
+
+指令：CANCEL
+
+---
+
+## 💬 回复规则
+
+1. 每次回复只能给出一个指令。
+2. 不输出完整交易计划。
+3. 不输出盘面扫描。
+4. 不输出大师箴言。
+5. 不同时给多空两个方向。
+6. 不解释太多理由。
+7. 没有明确触发时，禁止输出 ENTER LONG 或 ENTER SHORT。
+8. 数据不足时，默认输出 WAIT。
+9. 已有仓位时，只能在 HOLD / EXIT 中选择，除非用户明确表示没有持仓。
+10. 未进场时，不能输出 HOLD 或 EXIT。
+
+---
+
+## 最终输出格式限制
+
+普通状态只输出一行：
+
+指令：WAIT
+
+或：
+
+指令：READY
+
+或：
+
+指令：HOLD
+
+或：
+
+指令：EXIT
+
+或：
+
+指令：CANCEL
+
+只有开仓状态可以输出四行：
+
+指令：ENTER LONG  
+Entry：xxx  
+SL：xxx  
+TP：xxx  
+失效条件：xxx
+
+或：
+
+指令：ENTER SHORT  
+Entry：xxx  
+SL：xxx  
+TP：xxx  
+失效条件：xxx
+"""
+AUTO_TRADE_NOTIFY_ACTIONS = ("READY", "EXIT", "CANCEL", "ENTER LONG", "ENTER SHORT")
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8), name="Asia/Shanghai")
 PG_TIMEZONE = "Asia/Shanghai"
 
@@ -100,6 +377,13 @@ user_sessions = {}
 # 存储用户的文字 AI 会话状态
 # { user_id: HelperTextAI }
 ai_sessions = {}
+
+# 存储定时拉取的 K 线缓存
+# { symbol: { rows_by_interval, seen_ids_by_interval, updated_at, last_new_counts, last_fetched_counts } }
+kline_memory_cache = {}
+
+# 存储 5m 自动交易 AI 会话状态，保留定时请求的上下文
+auto_trade_ai_session = None
 
 
 def debug_log(message, exc=None):
@@ -234,6 +518,91 @@ def format_kline_time(value):
     return value.isoformat(timespec="minutes")
 
 
+def fetch_kline_rows_by_interval(symbol):
+    rows_by_interval = {}
+    fetched_counts = {}
+
+    for interval_name, days in KLINE_DAY_WINDOWS.items():
+        rows = fetch_kline_rows(symbol, interval_name, days=days)
+        rows_by_interval[interval_name] = rows
+        fetched_counts[interval_name] = len(rows)
+
+    for interval_name, limit in KLINE_LIMIT_WINDOWS.items():
+        rows = fetch_kline_rows(symbol, interval_name, limit=limit)
+        rows_by_interval[interval_name] = rows
+        fetched_counts[interval_name] = len(rows)
+
+    return rows_by_interval, fetched_counts
+
+
+def get_kline_memory_cache(symbol):
+    return kline_memory_cache.setdefault(symbol, {
+        "rows_by_interval": {},
+        "seen_ids_by_interval": {},
+        "updated_at": None,
+        "last_new_counts": {},
+        "last_fetched_counts": {},
+    })
+
+
+def get_cached_kline_rows_by_interval(symbol):
+    cache = kline_memory_cache.get(symbol)
+    if not cache or not cache.get("rows_by_interval"):
+        return None, None
+
+    rows_by_interval = {}
+    fetched_counts = {}
+    for interval_name in KLINE_INTERVAL_ORDER:
+        rows = cache["rows_by_interval"].get(interval_name, [])
+        rows_by_interval[interval_name] = list(rows)
+        fetched_counts[interval_name] = len(rows)
+
+    debug_log(
+        f"使用内存K线缓存: symbol={symbol}, "
+        f"updated_at={cache.get('updated_at')}, counts={fetched_counts}"
+    )
+    return rows_by_interval, fetched_counts
+
+
+def refresh_kline_memory_cache(symbol):
+    debug_log(f"开始刷新内存K线缓存: symbol={symbol}")
+    rows_by_interval, fetched_counts = fetch_kline_rows_by_interval(symbol)
+    cache = get_kline_memory_cache(symbol)
+    new_counts = {}
+
+    for interval_name in KLINE_INTERVAL_ORDER:
+        rows = [dict(row) for row in rows_by_interval.get(interval_name, [])]
+        fetched_ids = {row["id"] for row in rows}
+        seen_ids = cache["seen_ids_by_interval"].setdefault(interval_name, set())
+        new_rows = [row for row in rows if row["id"] not in seen_ids]
+
+        rows_by_id = {
+            row["id"]: row
+            for row in cache["rows_by_interval"].get(interval_name, [])
+            if row["id"] in fetched_ids
+        }
+        for row in rows:
+            rows_by_id[row["id"]] = row
+
+        cache["rows_by_interval"][interval_name] = [
+            rows_by_id[row["id"]]
+            for row in rows
+            if row["id"] in rows_by_id
+        ]
+        seen_ids.intersection_update(fetched_ids)
+        seen_ids.update(fetched_ids)
+        new_counts[interval_name] = len(new_rows)
+
+    cache["updated_at"] = datetime.datetime.now(BEIJING_TZ).isoformat(timespec="seconds")
+    cache["last_new_counts"] = new_counts
+    cache["last_fetched_counts"] = fetched_counts
+    debug_log(
+        f"内存K线缓存刷新完成: symbol={symbol}, "
+        f"fetched_counts={fetched_counts}, new_counts={new_counts}"
+    )
+    return cache, new_counts, fetched_counts
+
+
 def build_kline_prompt(symbol, seen_ids_by_interval=None):
     debug_log(f"开始组装K线prompt: symbol={symbol}")
     if seen_ids_by_interval is None:
@@ -242,20 +611,15 @@ def build_kline_prompt(symbol, seen_ids_by_interval=None):
     counts = {}
     fetched_counts = {}
     new_ids_by_interval = {}
+    rows_by_interval, cached_fetched_counts = get_cached_kline_rows_by_interval(symbol)
 
-    for interval_name, days in KLINE_DAY_WINDOWS.items():
-        rows = fetch_kline_rows(symbol, interval_name, days=days)
-        fetched_counts[interval_name] = len(rows)
-        seen_ids = seen_ids_by_interval.get(interval_name, set())
-        new_rows = [row for row in rows if row["id"] not in seen_ids]
-        counts[interval_name] = len(new_rows)
-        new_ids_by_interval[interval_name] = {row["id"] for row in new_rows}
-        debug_log(f"K线增量过滤: symbol={symbol}, interval={interval_name}, fetched={len(rows)}, seen={len(seen_ids)}, new={len(new_rows)}")
-        sections.append(format_kline_section(interval_name, new_rows))
+    if rows_by_interval is None:
+        rows_by_interval, fetched_counts = fetch_kline_rows_by_interval(symbol)
+    else:
+        fetched_counts = cached_fetched_counts
 
-    for interval_name, limit in KLINE_LIMIT_WINDOWS.items():
-        rows = fetch_kline_rows(symbol, interval_name, limit=limit)
-        fetched_counts[interval_name] = len(rows)
+    for interval_name in KLINE_INTERVAL_ORDER:
+        rows = rows_by_interval.get(interval_name, [])
         seen_ids = seen_ids_by_interval.get(interval_name, set())
         new_rows = [row for row in rows if row["id"] not in seen_ids]
         counts[interval_name] = len(new_rows)
@@ -271,6 +635,37 @@ def build_kline_prompt(symbol, seen_ids_by_interval=None):
         + "\n\n".join(sections)
     )
     debug_log(f"K线prompt组装完成: symbol={symbol}, fetched_counts={fetched_counts}, new_counts={counts}, chars={len(prompt)}")
+    return prompt, counts, fetched_counts, new_ids_by_interval
+
+
+def build_auto_trade_kline_prompt(symbol, seen_ids_by_interval=None):
+    debug_log(f"开始组装自动交易K线prompt: symbol={symbol}")
+    if seen_ids_by_interval is None:
+        seen_ids_by_interval = {}
+    sections = []
+    counts = {}
+    new_ids_by_interval = {}
+    rows_by_interval, fetched_counts = get_cached_kline_rows_by_interval(symbol)
+
+    if rows_by_interval is None:
+        rows_by_interval, fetched_counts = fetch_kline_rows_by_interval(symbol)
+
+    for interval_name in KLINE_INTERVAL_ORDER:
+        rows = rows_by_interval.get(interval_name, [])
+        seen_ids = seen_ids_by_interval.get(interval_name, set())
+        new_rows = [row for row in rows if row["id"] not in seen_ids]
+        counts[interval_name] = len(new_rows)
+        new_ids_by_interval[interval_name] = {row["id"] for row in new_rows}
+        debug_log(f"自动交易K线增量过滤: symbol={symbol}, interval={interval_name}, fetched={len(rows)}, seen={len(seen_ids)}, new={len(new_rows)}")
+        sections.append(format_kline_section(interval_name, new_rows))
+
+    prompt = (
+        f"以下是 {symbol} 5m 实时自动交易轮询新增多周期 K 线数据。\n"
+        f"本轮时间: {datetime.datetime.now(BEIJING_TZ).isoformat(timespec='seconds')}\n"
+        f"字段: open_time(Asia/Shanghai),open,high,low,close,volume\n\n"
+        + "\n\n".join(sections)
+    )
+    debug_log(f"自动交易K线prompt组装完成: symbol={symbol}, fetched_counts={fetched_counts}, new_counts={counts}, chars={len(prompt)}")
     return prompt, counts, fetched_counts, new_ids_by_interval
 
 
@@ -506,7 +901,9 @@ class HelperTextAI:
     def send_openai(self, prompt):
         debug_log(f"准备调用OpenAI文字模型: model={self.model}, reasoning_effort={OPENAI_REASONING_EFFORT}, history_messages={len(self.messages)}")
         client = self.get_openai_client()
-        messages = [{"role": "system", "content": self.system_instruction}]
+        messages = []
+        if self.system_instruction:
+            messages.append({"role": "system", "content": self.system_instruction})
         messages.extend(self.messages)
         messages.append({"role": "user", "content": prompt})
         response = client.chat.completions.create(
@@ -535,6 +932,78 @@ class HelperTextAI:
             debug_log(f"清空已发送缓存上下文: count={len(self.pending_contexts)}")
             self.pending_contexts.clear()
         return reply
+
+
+def get_auto_trade_ai_session():
+    global auto_trade_ai_session
+    if auto_trade_ai_session is None:
+        auto_trade_ai_session = HelperTextAI(system_instruction=AUTO_TRADE_SYSTEM_PROMPT)
+        debug_log(
+            f"初始化5m自动交易AI会话: model={auto_trade_ai_session.model_status()}, "
+            f"system_prompt_configured={bool(AUTO_TRADE_SYSTEM_PROMPT.strip())}"
+        )
+    return auto_trade_ai_session
+
+
+async def send_auto_trade_kline_to_ai(symbol):
+    ai_session = get_auto_trade_ai_session()
+    seen_ids_by_interval = ai_session.get_seen_kline_ids(symbol)
+    prompt, counts, fetched_counts, new_ids_by_interval = build_auto_trade_kline_prompt(symbol, seen_ids_by_interval)
+    total_new = sum(counts.values())
+    if total_new == 0:
+        debug_log(f"自动交易AI跳过: symbol={symbol}, reason=没有新增K线数据, fetched_counts={fetched_counts}")
+        return None
+
+    debug_log(
+        f"自动交易AI开始请求: symbol={symbol}, new_counts={counts}, "
+        f"fetched_counts={fetched_counts}, history_messages={len(ai_session.messages)}"
+    )
+    reply = await ai_session.chat_text(prompt)
+    ai_session.remember_kline_ids(symbol, new_ids_by_interval)
+    debug_log(
+        f"自动交易AI请求完成: symbol={symbol}, reply_chars={len(reply or '')}, "
+        f"history_messages={len(ai_session.messages)}"
+    )
+    return reply
+
+
+def extract_auto_trade_action(reply):
+    if not reply:
+        return None
+
+    action_pattern = "|".join(action.replace(" ", r"\s+") for action in AUTO_TRADE_NOTIFY_ACTIONS)
+    for raw_line in reply.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[\s>*#`_\-•]+", "", line)
+        line = re.sub(r"[*_`]+", "", line).strip()
+        line = re.sub(r"\s+", " ", line.upper()).strip()
+        match = re.match(rf"^(?:(?:指令|ACTION|COMMAND|SIGNAL)\s*[:：]\s*)?({action_pattern})\b", line)
+        if match:
+            return re.sub(r"\s+", " ", match.group(1))
+    return None
+
+
+async def send_bot_text_chunks(bot, chat_id, text):
+    if not text:
+        return
+    chunk_size = 3900
+    for i in range(0, len(text), chunk_size):
+        await bot.send_message(chat_id=chat_id, text=text[i:i + chunk_size])
+
+
+async def notify_auto_trade_action(context: ContextTypes.DEFAULT_TYPE, reply):
+    debug_log(f"自动交易AI回复内容(通知判断前):\n{reply or ''}")
+    action = extract_auto_trade_action(reply)
+    if not action:
+        debug_log("自动交易AI未触发用户通知")
+        return False
+
+    await send_bot_text_chunks(context.bot, ALLOWED_USER_ID, reply)
+    debug_log(f"自动交易AI已通知用户: user_id={ALLOWED_USER_ID}, action={action}, chars={len(reply or '')}")
+    return True
+
 
 async def check_auth(update: Update):
     user_id = update.effective_user.id if update.effective_user else None
@@ -852,6 +1321,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     debug_log(f"Telegram handler 未捕获异常: update={update}, error={context.error}", context.error)
 
+
+async def btc_kline_cache_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        refresh_kline_memory_cache(AUTO_KLINE_SYMBOL)
+        reply = await send_auto_trade_kline_to_ai(AUTO_KLINE_SYMBOL)
+        await notify_auto_trade_action(context, reply)
+    except Exception as e:
+        debug_log(f"定时K线缓存/自动交易AI任务失败: symbol={AUTO_KLINE_SYMBOL}, error={e}", e)
+
+
 def main():
     token = os.getenv('TELEGRAM_HELPER_BOT_TOKEN')
     if not token:
@@ -870,6 +1349,19 @@ def main():
     )
 
     application = Application.builder().token(token).build()
+    if application.job_queue:
+        application.job_queue.run_repeating(
+            btc_kline_cache_job,
+            interval=AUTO_KLINE_CACHE_INTERVAL_SECONDS,
+            first=10,
+            name="btc_kline_memory_cache",
+        )
+        debug_log(
+            f"已注册定时K线缓存任务: symbol_key={AUTO_KLINE_SYMBOL_KEY}, "
+            f"symbol={AUTO_KLINE_SYMBOL}, interval_seconds={AUTO_KLINE_CACHE_INTERVAL_SECONDS}"
+        )
+    else:
+        debug_log("JobQueue 不可用，未注册定时K线缓存任务")
 
     application.add_handler(CommandHandler("gen", start_gen))
     application.add_handler(CommandHandler("gen_me", start_gen))
